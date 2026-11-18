@@ -1,0 +1,3 @@
+* text=auto eol=lf
+*.iss text eol=crlf
+TERMS.txt text eol=crlf
