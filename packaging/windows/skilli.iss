@@ -10,7 +10,7 @@
 AppId=otnc.Skilli
 AppName=Skilli
 AppVersion={#AppVersion}
-AppPublisher=otnc
+AppPublisher=otoneko.
 DefaultDirName={localappdata}\Programs\Skilli
 DefaultGroupName=Skilli
 DisableProgramGroupPage=yes

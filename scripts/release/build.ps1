@@ -42,7 +42,7 @@ try {
     slug = 'skilli'
     identifier = 'com.otnc.skilli'
     version = $Version
-    publisher = 'otnc'
+    publisher = 'otoneko.'
     main = './cmd/skilli'
     windows = @{ displayName = 'Skilli' }
     updates = @{ github = 'otnc/Skilli'; publicKey = $publicKey; deltas = 0 }
