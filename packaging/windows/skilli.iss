@@ -33,6 +33,7 @@ Name: "ja"; MessagesFile: "compiler:Languages\Japanese.isl"
 Source: "{#SourceDir}\skilli.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\skilli-gui.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\.mygo-files"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#SourceDir}\icon.png"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#RepoDir}\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "{#RepoDir}\TERMS.txt"; DestDir: "{app}"; Flags: ignoreversion
 

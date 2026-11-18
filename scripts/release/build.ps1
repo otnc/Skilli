@@ -43,6 +43,8 @@ try {
   }
 
   New-Item -ItemType Directory -Path resources | Out-Null
+  # mygo build が resources/icon.png を skilli-gui.exe のアイコンとして埋め込む。
+  Copy-Item -LiteralPath (Join-Path $repo 'packaging/icon.png') -Destination resources/icon.png
   go build -trimpath -ldflags "-X main.version=$Version" -o resources/skilli.exe ./cmd/skilli
   if ($LASTEXITCODE -ne 0) { throw "CLI のビルドに失敗しました: $LASTEXITCODE" }
 
@@ -65,7 +67,7 @@ try {
   $out = Join-Path $repo 'dist/windows-amd64'
   New-Item -ItemType Directory -Path $out -Force | Out-Null
   $archive = "skilli-$Version-windows-amd64.tar.gz"
-  foreach ($asset in 'skilli.exe', 'skilli-gui.exe', '.mygo-files', $archive, 'update-windows-amd64.json') {
+  foreach ($asset in 'skilli.exe', 'skilli-gui.exe', '.mygo-files', 'icon.png', $archive, 'update-windows-amd64.json') {
     Copy-Item -LiteralPath (Join-Path $stage $asset) -Destination $out -Force
   }
 
