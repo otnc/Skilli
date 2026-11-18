@@ -23,8 +23,6 @@ const driveCheckInterval = 15 * time.Minute
 
 const lowSpaceNotificationID = "skilli-low-space"
 
-var warningColor = ui.Hex("#b45309")
-
 // dashboard is touched only on the main thread; goroutines hand their
 // results back through mygo.RunOnMain.
 type dashboard struct {
@@ -51,6 +49,10 @@ type dashboard struct {
 	loginErr     error
 
 	caches cacheView
+
+	version string
+	// tab is the page shown: tabDrives, tabCaches or tabSettings.
+	tab int
 }
 
 // Run starts the MyGo main loop. Call it from the main goroutine.
@@ -61,7 +63,7 @@ func Run(version string, background, checkUpdates bool) error {
 		return nil
 	}
 
-	view := &dashboard{}
+	view := &dashboard{version: version}
 	view.loadConfig()
 	view.caches.engine, view.caches.engineErr = cleanup.New()
 
@@ -163,7 +165,7 @@ func (d *dashboard) startTray() error {
 		Menu: mygo.NewMenu([]*mygo.MenuItem{
 			{Label: "開く", Click: func(*mygo.MenuItem, *mygo.Window) { d.show() }},
 			{Label: "空き容量を更新", Click: func(*mygo.MenuItem, *mygo.Window) { d.refresh() }},
-			{Label: "キャッシュを計測", Click: func(*mygo.MenuItem, *mygo.Window) { d.show(); d.scanCaches() }},
+			{Label: "キャッシュを計測", Click: func(*mygo.MenuItem, *mygo.Window) { d.tab = tabCaches; d.show(); d.scanCaches() }},
 			{Label: "アプリの更新を確認", Click: func(*mygo.MenuItem, *mygo.Window) { d.checkUpdates() }},
 			{Label: "終了", Click: func(*mygo.MenuItem, *mygo.Window) { mygo.App.Quit() }},
 		}),
@@ -184,8 +186,8 @@ func (d *dashboard) show() {
 	}
 	window := mygo.NewWindow(mygo.WindowOptions{
 		Title:   "Skilli（スキリ）",
-		Width:   640,
-		Height:  640,
+		Width:   600,
+		Height:  720,
 		Content: ui.View(d.render),
 	})
 	d.window = window
@@ -262,115 +264,4 @@ func (d *dashboard) updateTray() {
 		tip = string(runes[:126]) + "…"
 	}
 	d.tray.SetToolTip(tip)
-}
-
-func (d *dashboard) render(c *ui.Context) {
-	ui.Scroll(c).Fill().Children(func() {
-		ui.Column(c).Padding(24).Gap(14).Children(func() {
-			ui.Text(c, "ドライブの空き容量").FontSize(26).Bold()
-			if d.trayErr != nil {
-				ui.Text(c, "タスクトレイにアイコンを表示できませんでした。").TextColor(warningColor)
-			}
-			ui.Row(c).Gap(8).Children(func() {
-				if ui.PrimaryButton(c, "空き容量を更新").Disabled(d.reading).Clicked() {
-					d.refresh()
-				}
-				if ui.Button(c, "アプリの更新を確認").Disabled(d.updating).Clicked() {
-					d.checkUpdates()
-				}
-			})
-			if d.installing {
-				ui.Text(c, "アプリを更新しています。")
-			} else if d.updating {
-				ui.Text(c, "アプリの更新を確認しています。")
-			}
-			d.renderDrives(c)
-			ui.Divider(c)
-			d.renderCaches(c)
-			ui.Divider(c)
-			d.renderSettings(c)
-		})
-	})
-}
-
-func (d *dashboard) renderDrives(c *ui.Context) {
-	switch {
-	case d.reading && len(d.snapshot.Drives) == 0:
-		ui.Text(c, "ドライブを計測中…")
-	case d.readErr != nil:
-		ui.Text(c, "ドライブを確認できませんでした: "+d.readErr.Error()).Wrap().TextColor(warningColor)
-	case len(d.snapshot.Drives) == 0:
-		ui.Text(c, "固定ドライブが見つかりませんでした。")
-	}
-	for _, drive := range d.snapshot.Drives {
-		ui.Column(c).Gap(4).Children(func() {
-			ui.Text(c, drive.DisplayPath()).FontSize(17).Bold()
-			if !drive.Measured() {
-				ui.Text(c, "このドライブは計測できませんでした ("+drive.ErrorCode+")。")
-				return
-			}
-			capacity := float64(drive.CapacityBytes)
-			critical := max(capacity-float64(d.cfg.LowSpaceBytes), 0)
-			ui.Meter(c, capacity-float64(drive.FreeBytes), 0, capacity,
-				&ui.MeterLevels{Warning: max(capacity-float64(d.cfg.LowSpaceBytes)*1.5, 0), Critical: critical}).
-				Label(drive.DisplayPath() + " の使用量")
-			line := fmt.Sprintf("空き %s / %s (使用 %.0f%%)", storage.GiB(drive.FreeBytes), storage.GiB(drive.CapacityBytes), drive.UsedRatio()*100)
-			text := ui.Text(c, line)
-			switch {
-			case d.cfg.Ignores(drive.Root):
-				text.Tooltip("監視の対象外です")
-			case d.monitor.Low(drive.Root):
-				ui.Text(c, "空き容量が通知の基準を下回っています。").TextColor(warningColor)
-			}
-		})
-	}
-	if !d.snapshot.MeasuredAt.IsZero() {
-		ui.Text(c, "最終計測 "+d.snapshot.MeasuredAt.Format("2006/01/02 15:04:05")+" (常駐中は 15 分ごとに更新)")
-	}
-}
-
-func (d *dashboard) renderSettings(c *ui.Context) {
-	ui.Text(c, "設定").FontSize(20).Bold()
-	if d.configErr != nil {
-		ui.Text(c, "設定ファイルを読み込めなかったため既定値を使っています。変更すると上書きします: "+d.configErr.Error()).Wrap().TextColor(warningColor)
-	}
-	if ui.Checkbox(c, &d.notify, "空き容量が少なくなったら通知する").Changed() {
-		d.cfg.Notify = d.notify
-		d.saveConfig()
-	}
-	ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-		ui.Text(c, "通知する空き容量の基準 (GiB)")
-		if ui.NumberInput(c, &d.thresholdGiB, 1, 1024, 1).Width(120).Label("通知する空き容量の基準 (GiB)").Changed() {
-			d.cfg.LowSpaceBytes = uint64(d.thresholdGiB) << 30
-			d.saveConfig()
-		}
-	})
-	for _, drive := range d.snapshot.Drives {
-		watched := !d.cfg.Ignores(drive.Root)
-		if ui.Checkbox(c, &watched, drive.DisplayPath()+" を監視する").Changed() {
-			d.cfg.IgnoredDrives = slices.DeleteFunc(slices.Clone(d.cfg.IgnoredDrives), func(root string) bool {
-				return strings.EqualFold(root, drive.Root)
-			})
-			if !watched {
-				d.cfg.IgnoredDrives = append(d.cfg.IgnoredDrives, drive.Root)
-			}
-			d.saveConfig()
-		}
-	}
-	// The Run entry points at the running executable, which under go run
-	// is a temporary file that disappears; only offer it in release builds.
-	login := ui.Checkbox(c, &d.openAtLogin, "Windows へのサインイン時にトレイで起動する").Disabled(mygo.IsDev())
-	if mygo.IsDev() {
-		login.Tooltip("配布版でのみ設定できます")
-	}
-	if login.Changed() {
-		if d.loginErr = mygo.App.SetOpenAtLogin(d.openAtLogin); d.loginErr != nil {
-			d.openAtLogin = !d.openAtLogin
-		}
-	}
-	for _, err := range []error{d.saveErr, d.loginErr} {
-		if err != nil {
-			ui.Text(c, "設定を保存できませんでした: "+err.Error()).Wrap().TextColor(warningColor)
-		}
-	}
 }
