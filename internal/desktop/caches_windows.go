@@ -148,7 +148,7 @@ func (d *dashboard) cleanTarget(target cleanup.Target) {
 		plan, err := engine.NewPlan(ctx, target)
 		cancel()
 		if err != nil {
-			cleanupMessage("掃除の準備ができませんでした。", err.Error())
+			cleanupMessage("掃除の準備ができませんでした。", describeApplyError(err))
 			return
 		}
 		size := storage.Size(plan.Size.Bytes)
@@ -183,6 +183,8 @@ func (d *dashboard) cleanTarget(target cleanup.Target) {
 
 func describeApplyError(err error) string {
 	switch {
+	case errors.Is(err, cleanup.ErrWrongVersion):
+		return "ホームフォルダで実行した yarn などのバージョンが、この対象に合いません。別のキャッシュを消さないように中止しました。\n" + err.Error()
 	case errors.Is(err, cleanup.ErrBusy):
 		return "ほかの掃除が実行中です (CLI を含む)。終わってからやり直してください。"
 	case errors.Is(err, cleanup.ErrPlanExpired):

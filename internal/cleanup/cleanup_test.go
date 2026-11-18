@@ -11,10 +11,12 @@ import (
 	"time"
 )
 
-// fakeRunner resolves every command to exe and answers Output with dir.
+// fakeRunner resolves every command to exe, answers --version with
+// version and any other Output with dir.
 type fakeRunner struct {
 	exe       string
 	dir       string
+	version   string
 	outputErr error
 	runs      [][]string
 	// onRun lets a test change the world while the cleanup command runs.
@@ -23,9 +25,12 @@ type fakeRunner struct {
 
 func (f *fakeRunner) LookPath(string) (string, error) { return f.exe, nil }
 
-func (f *fakeRunner) Output(_ context.Context, _, _ string, _ []string) (string, error) {
+func (f *fakeRunner) Output(_ context.Context, _, _ string, args []string) (string, error) {
 	if f.outputErr != nil {
 		return "", f.outputErr
+	}
+	if len(args) == 1 && args[0] == "--version" {
+		return f.version + "\r\n", nil
 	}
 	return f.dir + "\r\n", nil
 }
@@ -406,14 +411,112 @@ func (r *dirRecorder) Output(ctx context.Context, dir, exe string, args []string
 	return r.fakeRunner.Output(ctx, dir, exe, args)
 }
 
+func TestYarnCleanupChecksTheYarnVersion(t *testing.T) {
+	cases := []struct {
+		id, version string
+		wantErr     bool
+		wantArgs    string
+	}{
+		{"yarn", "1.22.22", false, "cache clean"},
+		{"yarn", "4.5.1", true, ""},
+		{"yarn-berry", "4.5.1", false, "cache clean --all"},
+		{"yarn-berry", "3.8.7", false, "cache clean --all"},
+		{"yarn-berry", "1.22.22", true, ""},
+		{"yarn-berry", "not a version", true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.id+"@"+tc.version, func(t *testing.T) {
+			f := newFixture(t)
+			f.runner.version = tc.version
+			f.engine.Getenv = func(name string) string {
+				if name == "YARN_GLOBAL_FOLDER" {
+					return filepath.Dir(f.cache)
+				}
+				return ""
+			}
+			target, _ := FindTarget(tc.id)
+			plan, err := f.engine.NewPlan(t.Context(), target)
+			if tc.wantErr {
+				if !errors.Is(err, ErrWrongVersion) {
+					t.Fatalf("NewPlan: %v; want ErrWrongVersion", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The version is checked again right before running.
+			f.runner.version = "0.0.1"
+			if _, err := f.engine.Apply(t.Context(), plan, "cli"); !errors.Is(err, ErrWrongVersion) || len(f.runner.runs) != 0 {
+				t.Fatalf("Apply after a version change: %v, runs = %q", err, f.runner.runs)
+			}
+			f.runner.version = tc.version
+			if plan, err = f.engine.NewPlan(t.Context(), target); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.engine.Apply(t.Context(), plan, "cli"); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(f.runner.runs[0][1:], " "); got != tc.wantArgs {
+				t.Fatalf("ran %q; want %q", got, tc.wantArgs)
+			}
+		})
+	}
+}
+
+func TestFlutterBundledDart(t *testing.T) {
+	bin := t.TempDir()
+	wrapper := filepath.Join(bin, "dart.bat")
+	os.WriteFile(wrapper, nil, 0o700)
+
+	if got, err := flutterBundledDart(wrapper); err != nil || got != wrapper {
+		t.Fatalf("dart.bat outside Flutter = %q, %v; want it unchanged", got, err)
+	}
+
+	os.WriteFile(filepath.Join(bin, "flutter.bat"), nil, 0o700)
+	if _, err := flutterBundledDart(wrapper); err == nil {
+		t.Fatal("Flutter without its Dart SDK must be refused rather than run the wrapper")
+	}
+
+	bundled := filepath.Join(bin, "cache", "dart-sdk", "bin", "dart.exe")
+	os.MkdirAll(filepath.Dir(bundled), 0o700)
+	os.WriteFile(bundled, nil, 0o700)
+	if got, err := flutterBundledDart(wrapper); err != nil || got != bundled {
+		t.Fatalf("Flutter's dart = %q, %v; want %q", got, err, bundled)
+	}
+
+	standalone := filepath.Join(t.TempDir(), "dart.exe")
+	if got, err := flutterBundledDart(standalone); err != nil || got != standalone {
+		t.Fatalf("standalone dart = %q, %v", got, err)
+	}
+}
+
+func TestMajorVersion(t *testing.T) {
+	for out, want := range map[string]int{"4.5.1\r\n": 4, "1.22.22": 1, " 10.0.403\nextra": 10} {
+		if got, err := majorVersion(out); err != nil || got != want {
+			t.Errorf("majorVersion(%q) = %d, %v; want %d", out, got, err, want)
+		}
+	}
+	if _, err := majorVersion("yarn"); err == nil {
+		t.Error("a non-number must be an error")
+	}
+}
+
 func TestParsers(t *testing.T) {
 	nuget := "Welcome to .NET!\r\nglobal-packages: C:\\Users\\me\\.nuget\\packages\\\r\n"
 	if got, err := valueAfter("global-packages:")(nuget); err != nil || got != `C:\Users\me\.nuget\packages\` {
 		t.Errorf("nuget = %q, %v", got, err)
 	}
-	deno := "DENO_DIR location: \"C:\\Users\\me\\AppData\\Local\\deno\"\nRemote modules cache: \"x\"\n"
-	if got, err := valueAfter("DENO_DIR location:")(deno); err != nil || got != `C:\Users\me\AppData\Local\deno` {
+	deno := `{"version":1,"denoDir":"C:\\Users\\me\\AppData\\Local\\deno","modulesCache":"x"}`
+	if got, err := stringInJSON("denoDir")(deno); err != nil || got != `C:\Users\me\AppData\Local\deno` {
 		t.Errorf("deno = %q, %v", got, err)
+	}
+	if _, err := stringInJSON("denoDir")(`{"denoDir": 1}`); err == nil {
+		t.Error("a non-string denoDir must be an error")
+	}
+	quoted := "label: \"C:\\a b\"\n"
+	if got, err := valueAfter("label:")(quoted); err != nil || got != `C:\a b` {
+		t.Errorf("quoted = %q, %v", got, err)
 	}
 	if _, err := valueAfter("global-packages:")("nothing here"); err == nil {
 		t.Error("a missing label must be an error")

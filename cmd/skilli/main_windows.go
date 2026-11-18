@@ -384,7 +384,7 @@ func (c *cli) clean(ctx context.Context, args []string) int {
 	plan, err := engine.NewPlan(measureCtx, target)
 	cancel()
 	if err != nil {
-		fmt.Fprintf(c.stderr, "掃除の計画を作れませんでした: %v\n", err)
+		fmt.Fprintf(c.stderr, "掃除の計画を作れませんでした: %v\n", describeApplyError(err))
 		return exitError
 	}
 
@@ -419,6 +419,8 @@ func (c *cli) clean(ctx context.Context, args []string) int {
 
 func describeApplyError(err error) string {
 	switch {
+	case errors.Is(err, cleanup.ErrWrongVersion):
+		return "ホームフォルダで実行した yarn などのバージョンが、この対象に合いません。別のキャッシュを消さないように中止しました。(" + err.Error() + ")"
 	case errors.Is(err, cleanup.ErrBusy):
 		return "ほかの掃除が実行中です。終わってからやり直してください。"
 	case errors.Is(err, cleanup.ErrPlanExpired):

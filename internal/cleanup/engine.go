@@ -38,6 +38,8 @@ var (
 	ErrPlanChanged = errors.New("tool or folder changed since the plan")
 	// ErrNotCleanable reports a measure-only target.
 	ErrNotCleanable = errors.New("target has no cleanup command")
+	// ErrWrongVersion reports a tool whose version would clean another cache.
+	ErrWrongVersion = errors.New("tool version does not match the target")
 )
 
 // Runner runs external commands. Tests replace it.
@@ -97,7 +99,7 @@ func (e *Engine) Locate(ctx context.Context, t Target) Location {
 		}
 		loc.Dir = dir
 	} else {
-		exe, err := e.Runner.LookPath(t.Locate.Name)
+		exe, err := e.lookPath(t, t.Locate.Name)
 		if err != nil {
 			loc.Status = Missing
 			return loc
@@ -227,12 +229,15 @@ func (e *Engine) NewPlan(ctx context.Context, t Target) (*Plan, error) {
 	exe := scan.Executable
 	if !t.locatedByCommand() {
 		var err error
-		if exe, err = e.Runner.LookPath(t.Clean.Name); err != nil {
+		if exe, err = e.lookPath(t, t.Clean.Name); err != nil {
 			return nil, fmt.Errorf("%s was not found: %w", t.Clean.Name, err)
 		}
 	}
 	info, err := os.Stat(exe)
 	if err != nil {
+		return nil, err
+	}
+	if err := e.checkVersion(ctx, t, exe); err != nil {
 		return nil, err
 	}
 	now := e.Now()
@@ -271,7 +276,7 @@ func (e *Engine) Apply(ctx context.Context, p *Plan, source string) (Result, err
 	case err == nil:
 		entry.Status = StatusSucceeded
 	case errors.Is(err, ErrBusy), errors.Is(err, ErrPlanExpired), errors.Is(err, ErrPlanUsed),
-		errors.Is(err, ErrPlanChanged), errors.Is(err, ErrUnsafeFolder):
+		errors.Is(err, ErrPlanChanged), errors.Is(err, ErrUnsafeFolder), errors.Is(err, ErrWrongVersion):
 		entry.Status = StatusRefused
 	default:
 		entry.Status = StatusFailed
@@ -335,7 +340,7 @@ func (e *Engine) apply(ctx context.Context, p *Plan) (Result, error) {
 }
 
 func (e *Engine) verify(ctx context.Context, p *Plan) error {
-	exe, err := e.Runner.LookPath(p.Target.Clean.Name)
+	exe, err := e.lookPath(p.Target, p.Target.Clean.Name)
 	if err != nil || !samePath(exe, p.Executable) {
 		return fmt.Errorf("%w: %s now resolves to %q", ErrPlanChanged, p.Target.Clean.Name, exe)
 	}
@@ -347,7 +352,38 @@ func (e *Engine) verify(ctx context.Context, p *Plan) error {
 	if loc.Status != Found || !samePath(loc.Dir, p.Dir) {
 		return fmt.Errorf("%w: the folder is now %q", ErrPlanChanged, loc.Dir)
 	}
+	if err := e.checkVersion(ctx, p.Target, exe); err != nil {
+		return err
+	}
 	return e.checkFolder(p.Dir)
+}
+
+// lookPath resolves name through PATH and then through t.Executable.
+func (e *Engine) lookPath(t Target, name string) (string, error) {
+	exe, err := e.Runner.LookPath(name)
+	if err != nil || t.Executable == nil {
+		return exe, err
+	}
+	return t.Executable(exe)
+}
+
+// checkVersion refuses a cleanup whose tool has a major version the
+// target does not accept, such as Yarn 1 for the Yarn 2+ cache.
+func (e *Engine) checkVersion(ctx context.Context, t Target, exe string) error {
+	if t.AcceptMajor == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, LocateTimeout)
+	defer cancel()
+	out, err := e.Runner.Output(ctx, t.WorkDir, exe, []string{"--version"})
+	if err != nil {
+		return fmt.Errorf("%w: %s --version failed: %w", ErrWrongVersion, t.Clean.Name, err)
+	}
+	major, err := majorVersion(out)
+	if err != nil || !t.AcceptMajor(major) {
+		return fmt.Errorf("%w: %s is version %q", ErrWrongVersion, t.Clean.Name, strings.TrimSpace(out))
+	}
+	return nil
 }
 
 func (e *Engine) checkFolder(dir string) error {

@@ -9,8 +9,10 @@ package cleanup
 import (
 	"encoding/json/v2"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -45,6 +47,14 @@ type Target struct {
 	// Clean is the tool's own cleanup command, or nil for a target that
 	// Skilli does not clean itself.
 	Clean *Command
+	// AcceptMajor, when set, runs the clean tool with --version before a
+	// cleanup and refuses it unless the major version passes. The same
+	// yarn command cleans Yarn 1's cache or Yarn 2+'s depending on which
+	// Yarn PATH resolves to.
+	AcceptMajor func(major int) bool
+	// Executable maps the executable PATH resolves to the one to run, or
+	// refuses it, as for the dart.bat wrapper of Flutter.
+	Executable func(found string) (string, error)
 	// SettingsURI is an ms-settings: page where Windows cleans the target,
 	// for a folder that no single tool owns.
 	SettingsURI string
@@ -136,8 +146,26 @@ func Targets() []Target {
 			ID:     "yarn",
 			Name:   "Yarn キャッシュ",
 			Locate: Command{Name: "yarn", Args: []string{"cache", "dir"}},
-			Clean:  &Command{Name: "yarn", Args: []string{"cache", "clean"}},
-			Note:   "yarn cache clean で Yarn 1 のグローバルキャッシュをすべて削除します。次のインストールで再ダウンロードされます。Yarn 2 以降がプロジェクトごとに持つキャッシュは対象外です。",
+			// Yarn 2 and later have no cache dir command, so a failing
+			// yarn means PATH has no Yarn 1.
+			MissingIfLocateFails: true,
+			Clean:                &Command{Name: "yarn", Args: []string{"cache", "clean"}},
+			AcceptMajor:          func(major int) bool { return major == 1 },
+			Note:                 "yarn cache clean で Yarn 1 のグローバルキャッシュをすべて削除します。次のインストールで再ダウンロードされます。",
+		},
+		{
+			ID:          "yarn-berry",
+			Name:        "Yarn 2 以降のグローバルキャッシュ",
+			EnvDir:      "YARN_GLOBAL_FOLDER",
+			DefaultBase: "LOCALAPPDATA",
+			DefaultDir:  `Yarn\Berry`,
+			SubDir:      "cache",
+			// --all, not --mirror: with Yarn 4's default global cache the
+			// cache folder and the mirror are the same folder, so Yarn sets
+			// no mirror and --mirror would remove nothing.
+			Clean:       &Command{Name: "yarn", Args: []string{"cache", "clean", "--all"}},
+			AcceptMajor: func(major int) bool { return major >= 2 },
+			Note:        "yarn cache clean --all で、Yarn 2 以降がプロジェクト間で共有するキャッシュを削除します。次のインストールで再ダウンロードされます。ホームフォルダで実行した yarn が Yarn 2 以降のときだけ掃除できます。.yarnrc.yml の globalFolder で場所を変えている場合は、既定の場所だけを計測します。",
 		},
 		{
 			ID:         "bun",
@@ -149,8 +177,8 @@ func Targets() []Target {
 		{
 			ID:     "deno",
 			Name:   "Deno キャッシュ",
-			Locate: Command{Name: "deno", Args: []string{"info"}},
-			Parse:  valueAfter("DENO_DIR location:"),
+			Locate: Command{Name: "deno", Args: []string{"info", "--json"}},
+			Parse:  stringInJSON("denoDir"),
 			Clean:  &Command{Name: "deno", Args: []string{"clean"}},
 			Note:   "deno clean で Deno のグローバルなモジュールキャッシュ (DENO_DIR) をすべて削除します。次の実行で再ダウンロードされます。",
 		},
@@ -249,7 +277,8 @@ func Targets() []Target {
 			DefaultBase: "LOCALAPPDATA",
 			DefaultDir:  `Pub\Cache`,
 			Clean:       &Command{Name: "dart", Args: []string{"pub", "cache", "clean", "--force"}},
-			Note:        "注意: dart pub cache clean は pub のキャッシュをすべて削除します。各プロジェクトで dart pub get か flutter pub get を実行し直すまで、ビルドできなくなります。",
+			Executable:  flutterBundledDart,
+			Note:        "注意: dart pub cache clean は pub のキャッシュをすべて削除します。各プロジェクトで dart pub get か flutter pub get を実行し直すまで、ビルドできなくなります。Flutter の dart は、Flutter に同梱された Dart SDK を直接実行します。",
 		},
 		// Other
 		{
@@ -342,6 +371,50 @@ func valueAfter(label string) func(string) (string, error) {
 			}
 		}
 		return "", fmt.Errorf("no line starting with %q", label)
+	}
+}
+
+// flutterBundledDart replaces Flutter's bin\dart.bat with the Dart SDK
+// that Flutter keeps in bin\cache\dart-sdk. The wrapper checks the Flutter
+// checkout with git on every run and may download a Dart SDK or rebuild
+// the flutter tool, which a cache cleanup must not set off. If Flutter has
+// not downloaded its Dart SDK yet, the wrapper would, so dart is refused.
+func flutterBundledDart(found string) (string, error) {
+	dir := filepath.Dir(found)
+	if !strings.EqualFold(filepath.Base(found), "dart.bat") {
+		return found, nil
+	}
+	if _, err := os.Stat(filepath.Join(dir, "flutter.bat")); err != nil {
+		return found, nil
+	}
+	bundled := filepath.Join(dir, "cache", "dart-sdk", "bin", "dart.exe")
+	if _, err := os.Stat(bundled); err != nil {
+		return "", fmt.Errorf("Flutter has not downloaded its Dart SDK to %s yet; run flutter once first", bundled)
+	}
+	return bundled, nil
+}
+
+// majorVersion reads the major version from output such as "4.5.1" or
+// "1.22.22", the first line of yarn --version.
+func majorVersion(output string) (int, error) {
+	line, _, _ := strings.Cut(strings.TrimSpace(output), "\n")
+	major, _, _ := strings.Cut(strings.TrimSpace(line), ".")
+	return strconv.Atoi(major)
+}
+
+// stringInJSON reads a JSON object and returns the string under key, such
+// as denoDir in the output of deno info --json.
+func stringInJSON(key string) func(string) (string, error) {
+	return func(output string) (string, error) {
+		var fields map[string]any
+		if err := json.Unmarshal([]byte(output), &fields); err != nil {
+			return "", err
+		}
+		value, ok := fields[key].(string)
+		if !ok {
+			return "", fmt.Errorf("no string %s in the output", key)
+		}
+		return value, nil
 	}
 }
 
