@@ -6,3 +6,7 @@ coverage.*
 go.work
 go.work.sum
 .mygo/
+.env
+.env.local
+.env.*
+!.env.example

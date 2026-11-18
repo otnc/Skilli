@@ -44,10 +44,23 @@ GitHub Releases からインストールした配布版では、画面または�
 
 ### 初回の設定
 
-次のコマンドで更新署名用の鍵を生成します。作成した秘密鍵は今後のリリースでも必要なので、安全な場所に保管してください。
+更新ファイルの署名に使う鍵を作り、リポジトリのルートにある `.env` に書きます。`.env` は Git で管理しません。書き方は [.env.example](.env.example) にあります。秘密鍵をなくすと、インストール済みの Skilli に更新を届けられなくなります。`.env` とは別に、パスワードマネージャーなどにも保管してください。
 
 ```powershell
 go run github.com/egoist/mygo/cmd/mygo@v0.9.2 keygen
 ```
 
-GitHub リポジトリの **Settings → Secrets and variables → Actions** で、`mygo-update.pub` の内容を変数 `MYGO_UPDATER_PUBLIC_KEY` に、`mygo-update.key` の内容をシークレット `MYGO_UPDATER_PRIVATE_KEY` に登録します。配布版は公開された `otnc/Skilli` の GitHub Releases を更新先として使います。
+`keygen` は鍵を `%APPDATA%\mygo\update-keys` に書き出します。`mygo-update.pub` の内容を `MYGO_UPDATER_PUBLIC_KEY` に、`mygo-update.key` の内容を `MYGO_UPDATER_PRIVATE_KEY` に書きます。
+
+GitHub Actions のワークフローは、公開鍵を変数から、秘密鍵をシークレットから読みます。`.env` をそのまま `gh secret set -f .env` に渡すと公開鍵もシークレットになり、ワークフローから読めません。次のように1行ずつ分けて登録します。
+
+```sh
+tmp=$(mktemp -d)
+grep '^MYGO_UPDATER_PRIVATE_KEY=' .env > "$tmp/secret.env"
+grep '^MYGO_UPDATER_PUBLIC_KEY=' .env > "$tmp/variable.env"
+gh secret set -f "$tmp/secret.env"
+gh variable set -f "$tmp/variable.env"
+rm -rf "$tmp"
+```
+
+手元で `scripts/release/build.ps1` を実行するときは、環境変数に鍵がなければ `.env` から読みます。配布版は、公開された `otnc/Skilli` の GitHub Releases を更新先として使います。

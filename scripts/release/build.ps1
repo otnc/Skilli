@@ -8,6 +8,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+# 手元でのビルドでは、環境変数がなければ .env から鍵を読む。CI ではシークレットと変数から渡す。
+$envFile = Join-Path $repo '.env'
+if (Test-Path -LiteralPath $envFile) {
+  foreach ($line in Get-Content -LiteralPath $envFile) {
+    if ($line -match '^(MYGO_UPDATER_(?:PUBLIC|PRIVATE)_KEY)=(.+)$' -and !(Test-Path -LiteralPath "env:$($Matches[1])")) {
+      Set-Item -LiteralPath "env:$($Matches[1])" -Value $Matches[2]
+    }
+  }
+}
 $publicKey = $env:MYGO_UPDATER_PUBLIC_KEY
 if (!$publicKey -or !$env:MYGO_UPDATER_PRIVATE_KEY) {
   throw 'MYGO_UPDATER_PUBLIC_KEY と MYGO_UPDATER_PRIVATE_KEY を設定してください。'
