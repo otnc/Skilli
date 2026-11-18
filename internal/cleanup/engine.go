@@ -38,6 +38,8 @@ var (
 	ErrPlanChanged = errors.New("tool or folder changed since the plan")
 	// ErrNotCleanable reports a measure-only target.
 	ErrNotCleanable = errors.New("target has no cleanup command")
+	// ErrInUse reports that a program using the cache is running.
+	ErrInUse = errors.New("a program that uses the cache is running")
 	// ErrWrongVersion reports a tool whose version would clean another cache.
 	ErrWrongVersion = errors.New("tool version does not match the target")
 )
@@ -67,6 +69,8 @@ type Engine struct {
 	History *History
 	Getenv  func(string) string
 	Home    func() (string, error)
+	// Running returns which of the named executables are running.
+	Running func(names []string) ([]string, error)
 	Now     func() time.Time
 
 	mu      sync.Mutex
@@ -171,12 +175,13 @@ type Scan struct {
 	Size     *Size    `json:"size,omitempty"`
 	Clean    []string `json:"clean_command,omitempty"`
 	Settings string   `json:"settings_uri,omitempty"`
+	Deletes  bool     `json:"deletes,omitzero"`
 }
 
 // Scan locates and measures t. The measurement stops when ctx ends and is
 // then marked partial.
 func (e *Engine) Scan(ctx context.Context, t Target) Scan {
-	result := Scan{ID: t.ID, Name: t.Name, Location: e.Locate(ctx, t), Settings: t.SettingsURI}
+	result := Scan{ID: t.ID, Name: t.Name, Location: e.Locate(ctx, t), Settings: t.SettingsURI, Deletes: t.Delete != nil}
 	if t.Clean != nil {
 		result.Clean = append([]string{t.Clean.Name}, t.Clean.Args...)
 	}
@@ -195,23 +200,35 @@ func (e *Engine) Scan(ctx context.Context, t Target) Scan {
 // Plan is a cleanup the user has to confirm. It is valid for PlanLifetime
 // and can be applied once.
 type Plan struct {
-	ID         string
-	Target     Target
-	Dir        string
+	ID     string
+	Target Target
+	Dir    string
+	// Executable is the cleanup command's executable; empty for a deletion.
 	Executable string
 	exeInfo    os.FileInfo
-	Size       Size
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
+	// Scope lists the folders whose contents a deletion removes.
+	Scope     []string
+	dirInfo   os.FileInfo
+	Size      Size
+	CreatedAt time.Time
+	ExpiresAt time.Time
 }
 
-// Command returns the command line the plan runs, for display.
+// Deletes reports whether the plan has Skilli remove files itself.
+func (p *Plan) Deletes() bool { return p.Target.Delete != nil }
+
+// Command describes what the plan runs or deletes, for display.
 func (p *Plan) Command() string {
+	if p.Deletes() {
+		return "Skilli が中身を直接削除: " + strings.Join(p.Scope, ", ")
+	}
 	return strings.Join(append([]string{p.Executable}, p.Target.Clean.Args...), " ")
 }
 
 // NewPlan locates and measures t and checks that its folder is safe to
-// hand to the tool's cleanup command.
+// clean: for a cleanup command, that the tool resolves to a fixed
+// executable of an accepted version; for a deletion, that no program named
+// in t.Busy runs.
 func (e *Engine) NewPlan(ctx context.Context, t Target) (*Plan, error) {
 	if !t.Cleanable() {
 		return nil, ErrNotCleanable
@@ -226,6 +243,25 @@ func (e *Engine) NewPlan(ctx context.Context, t Target) (*Plan, error) {
 	if err := e.checkFolder(scan.Dir); err != nil {
 		return nil, err
 	}
+	now := e.Now()
+	plan := &Plan{
+		ID:        uuid.New().String(),
+		Target:    t,
+		Dir:       scan.Dir,
+		Size:      *scan.Size,
+		CreatedAt: now,
+		ExpiresAt: now.Add(PlanLifetime),
+	}
+	if err := e.checkBusy(t); err != nil {
+		return nil, err
+	}
+	if t.Delete != nil {
+		if err := e.planDeletion(ctx, plan); err != nil {
+			return nil, err
+		}
+		return plan, nil
+	}
+
 	exe := scan.Executable
 	if !t.locatedByCommand() {
 		var err error
@@ -240,17 +276,46 @@ func (e *Engine) NewPlan(ctx context.Context, t Target) (*Plan, error) {
 	if err := e.checkVersion(ctx, t, exe); err != nil {
 		return nil, err
 	}
-	now := e.Now()
-	return &Plan{
-		ID:         uuid.New().String(),
-		Target:     t,
-		Dir:        scan.Dir,
-		Executable: exe,
-		exeInfo:    info,
-		Size:       *scan.Size,
-		CreatedAt:  now,
-		ExpiresAt:  now.Add(PlanLifetime),
-	}, nil
+	plan.Executable, plan.exeInfo = exe, pinIdentity(info)
+	return plan, nil
+}
+
+func (e *Engine) planDeletion(ctx context.Context, p *Plan) error {
+	info, err := os.Lstat(p.Dir)
+	if err != nil {
+		return err
+	}
+	p.dirInfo = pinIdentity(info)
+	p.Scope = deletionScope(p.Dir, p.Target.Delete)
+	// The plan shows only what would be deleted, which for Hugging Face
+	// is less than the measured folder.
+	p.Size = Size{}
+	for _, dir := range p.Scope {
+		if err := CheckOnDisk(dir); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		size, err := Measure(ctx, dir)
+		if err != nil {
+			return err
+		}
+		p.Size.Bytes += size.Bytes
+		p.Size.Files += size.Files
+		p.Size.Partial = p.Size.Partial || size.Partial
+	}
+	return nil
+}
+
+func deletionScope(dir string, d *Deletion) []string {
+	if len(d.Paths) == 0 {
+		return []string{dir}
+	}
+	scope := make([]string, 0, len(d.Paths))
+	for _, path := range d.Paths {
+		scope = append(scope, filepath.Join(dir, path))
+	}
+	return scope
 }
 
 // Result is the outcome of Apply.
@@ -260,31 +325,46 @@ type Result struct {
 	FreeBefore uint64
 	FreeAfter  uint64
 	Output     string
+	// Skipped counts what a deletion left in place: files in use or
+	// protected, and links, which it never follows or removes.
+	Skipped int
 }
 
-// Apply runs the plan's cleanup command after checking again that the
-// plan is unused and unexpired, that PATH resolves the same unchanged
-// executable, that the tool reports the same folder, and that the folder
-// is still safe. Any difference refuses the cleanup instead of falling
-// back to another method. Every attempt is written to the history.
+// Apply cleans up after checking again that the plan is unused and
+// unexpired and that the folder is the same, still safe one. A cleanup
+// command also needs PATH to resolve the same unchanged executable of an
+// accepted version; a deletion needs the folder to be the very directory
+// measured and the programs that use it to be closed. Any difference
+// refuses the cleanup instead of falling back to another method. Every
+// attempt is written to the history.
 //
 // source names who asked, such as "gui" or "cli".
 func (e *Engine) Apply(ctx context.Context, p *Plan, source string) (Result, error) {
-	entry := Entry{Time: e.Now(), Source: source, Target: p.Target.ID, SizeBefore: p.Size.Bytes}
+	entry := Entry{Time: e.Now(), Source: source, Target: p.Target.ID, Method: MethodCommand, SizeBefore: p.Size.Bytes}
+	if p.Deletes() {
+		entry.Method = MethodDelete
+	}
 	result, err := e.apply(ctx, p)
 	switch {
 	case err == nil:
 		entry.Status = StatusSucceeded
 	case errors.Is(err, ErrBusy), errors.Is(err, ErrPlanExpired), errors.Is(err, ErrPlanUsed),
-		errors.Is(err, ErrPlanChanged), errors.Is(err, ErrUnsafeFolder), errors.Is(err, ErrWrongVersion):
+		errors.Is(err, ErrPlanChanged), errors.Is(err, ErrUnsafeFolder), errors.Is(err, ErrWrongVersion),
+		errors.Is(err, ErrInUse):
 		entry.Status = StatusRefused
 	default:
 		entry.Status = StatusFailed
 	}
 	if err != nil {
 		entry.Error = err.Error()
+		if home, herr := e.Home(); herr == nil && home != "" {
+			// Paths appear both as they are and quoted with %q, which
+			// doubles every backslash.
+			entry.Error = replaceFold(entry.Error, strings.ReplaceAll(home, `\`, `\\`), "~")
+			entry.Error = replaceFold(entry.Error, home, "~")
+		}
 	}
-	entry.SizeAfter, entry.FreeBefore, entry.FreeAfter = result.SizeAfter.Bytes, result.FreeBefore, result.FreeAfter
+	entry.SizeAfter, entry.FreeBefore, entry.FreeAfter, entry.Skipped = result.SizeAfter.Bytes, result.FreeBefore, result.FreeAfter, result.Skipped
 	if e.History != nil {
 		if herr := e.History.Append(entry); herr != nil && err == nil {
 			err = fmt.Errorf("cleanup succeeded but the history could not be written: %w", herr)
@@ -323,39 +403,105 @@ func (e *Engine) apply(ctx context.Context, p *Plan) (Result, error) {
 	}
 	runCtx, cancel := context.WithTimeout(ctx, CleanTimeout)
 	defer cancel()
-	result.Output, err = e.Runner.Run(runCtx, p.Target.WorkDir, p.Executable, p.Target.Clean.Args)
-	if err != nil {
-		if runCtx.Err() != nil {
-			err = fmt.Errorf("%s did not finish within %s: %w", p.Target.Clean.Name, CleanTimeout, err)
+	if p.Deletes() {
+		for _, dir := range p.Scope {
+			if _, statErr := os.Lstat(dir); errors.Is(statErr, os.ErrNotExist) {
+				continue
+			}
+			skipped, delErr := RemoveContents(runCtx, dir)
+			result.Skipped += skipped
+			if delErr != nil {
+				err = delErr
+				break
+			}
 		}
-		return result, err
+	} else {
+		result.Output, err = e.Runner.Run(runCtx, p.Target.WorkDir, p.Executable, p.Target.Clean.Args)
 	}
-	if free, err := e.FreeBytes(p.Dir); err == nil {
+	if err != nil && runCtx.Err() != nil {
+		err = fmt.Errorf("the cleanup did not finish within %s: %w", CleanTimeout, err)
+	}
+	if free, ferr := e.FreeBytes(p.Dir); ferr == nil {
 		result.FreeAfter = free
 	}
-	if size, err := Measure(ctx, p.Dir); err == nil {
-		result.SizeAfter = size
+	for _, dir := range measuredAfter(p) {
+		if size, merr := Measure(ctx, dir); merr == nil {
+			result.SizeAfter.Bytes += size.Bytes
+			result.SizeAfter.Files += size.Files
+		}
 	}
-	return result, nil
+	return result, err
+}
+
+func measuredAfter(p *Plan) []string {
+	if p.Deletes() {
+		return p.Scope
+	}
+	return []string{p.Dir}
 }
 
 func (e *Engine) verify(ctx context.Context, p *Plan) error {
-	exe, err := e.lookPath(p.Target, p.Target.Clean.Name)
-	if err != nil || !samePath(exe, p.Executable) {
-		return fmt.Errorf("%w: %s now resolves to %q", ErrPlanChanged, p.Target.Clean.Name, exe)
+	if err := e.checkBusy(p.Target); err != nil {
+		return err
 	}
-	info, err := os.Stat(exe)
-	if err != nil || !os.SameFile(info, p.exeInfo) || !info.ModTime().Equal(p.exeInfo.ModTime()) || info.Size() != p.exeInfo.Size() {
-		return fmt.Errorf("%w: %s was replaced", ErrPlanChanged, exe)
+	if p.Deletes() {
+		// The folder must be the directory that was measured, not one
+		// created in its place at the same path since.
+		info, err := os.Lstat(p.Dir)
+		if err != nil || !os.SameFile(info, p.dirInfo) {
+			return fmt.Errorf("%w: %s was replaced", ErrPlanChanged, p.Dir)
+		}
+	} else {
+		exe, err := e.lookPath(p.Target, p.Target.Clean.Name)
+		if err != nil || !samePath(exe, p.Executable) {
+			return fmt.Errorf("%w: %s now resolves to %q", ErrPlanChanged, p.Target.Clean.Name, exe)
+		}
+		info, err := os.Stat(exe)
+		if err != nil || !os.SameFile(info, p.exeInfo) || !info.ModTime().Equal(p.exeInfo.ModTime()) || info.Size() != p.exeInfo.Size() {
+			return fmt.Errorf("%w: %s was replaced", ErrPlanChanged, exe)
+		}
+		if err := e.checkVersion(ctx, p.Target, exe); err != nil {
+			return err
+		}
 	}
 	loc := e.Locate(ctx, p.Target)
 	if loc.Status != Found || !samePath(loc.Dir, p.Dir) {
 		return fmt.Errorf("%w: the folder is now %q", ErrPlanChanged, loc.Dir)
 	}
-	if err := e.checkVersion(ctx, p.Target, exe); err != nil {
+	if err := e.checkFolder(p.Dir); err != nil {
 		return err
 	}
-	return e.checkFolder(p.Dir)
+	for _, dir := range p.Scope {
+		if err := CheckOnDisk(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+// pinIdentity makes info remember the file it describes now. On Windows,
+// a FileInfo from Stat or Lstat reads the file's ID only when os.SameFile
+// first needs it, by opening its path again; comparing two infos later
+// would then compare whatever is at the path at that moment, and a folder
+// or executable replaced since the plan would go unnoticed.
+func pinIdentity(info os.FileInfo) os.FileInfo {
+	os.SameFile(info, info)
+	return info
+}
+
+// checkBusy refuses a cleanup while a program that uses the cache runs.
+func (e *Engine) checkBusy(t Target) error {
+	if len(t.Busy) == 0 {
+		return nil
+	}
+	running, err := e.Running(t.Busy)
+	if err != nil {
+		return fmt.Errorf("%w: could not list running programs: %w", ErrInUse, err)
+	}
+	if len(running) > 0 {
+		return fmt.Errorf("%w: %s", ErrInUse, strings.Join(running, ", "))
+	}
+	return nil
 }
 
 // lookPath resolves name through PATH and then through t.Executable.

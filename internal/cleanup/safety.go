@@ -81,6 +81,28 @@ func isWithin(path, dir string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
+// replaceFold replaces every case-insensitive occurrence of old in s, as
+// Windows paths in error messages may differ in case from the home folder.
+func replaceFold(s, old, replacement string) string {
+	lower, lowerOld := strings.ToLower(s), strings.ToLower(old)
+	// The index arithmetic below needs lowering to keep byte lengths,
+	// which a few non-ASCII letters do not.
+	if len(lower) != len(s) || len(lowerOld) != len(old) {
+		return strings.ReplaceAll(s, old, replacement)
+	}
+	var b strings.Builder
+	for {
+		i := strings.Index(lower, lowerOld)
+		if i < 0 || old == "" {
+			b.WriteString(s)
+			return b.String()
+		}
+		b.WriteString(s[:i])
+		b.WriteString(replacement)
+		s, lower = s[i+len(old):], lower[i+len(old):]
+	}
+}
+
 // samePath compares Windows paths case-insensitively.
 func samePath(a, b string) bool {
 	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))

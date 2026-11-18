@@ -78,6 +78,7 @@ func newFixture(t *testing.T) *fixture {
 		History:   &History{Path: f.history},
 		Getenv:    func(string) string { return "" },
 		Home:      func() (string, error) { return root, nil },
+		Running:   func([]string) ([]string, error) { return nil, nil },
 		Now:       func() time.Time { return f.now },
 	}
 	return f

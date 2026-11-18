@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -24,7 +23,7 @@ import (
 	"github.com/otnc/Skilli/internal/storage"
 )
 
-var version = "0.1.0-dev"
+var version = "0.2.0-dev"
 
 // Exit codes shared by every command.
 const (
@@ -127,7 +126,7 @@ const helpText = `Skilli（スキリ）
   skilli --background          トレイに常駐する
   skilli status [--json]       固定ドライブの空き容量を確認する
   skilli scan [ID...] [--json] キャッシュの場所とサイズを計測する
-  skilli clean <ID>            確認のうえ、ツール公式のコマンドでキャッシュを掃除する
+  skilli clean <ID>            確認のうえ、公式コマンドか直接削除でキャッシュを掃除する
                                (temp は Windows の設定を開く)
   skilli history [--days N] [--json]
                                掃除の履歴を表示する
@@ -384,7 +383,7 @@ func (c *cli) clean(ctx context.Context, args []string) int {
 	plan, err := engine.NewPlan(measureCtx, target)
 	cancel()
 	if err != nil {
-		fmt.Fprintf(c.stderr, "掃除の計画を作れませんでした: %v\n", describeApplyError(err))
+		fmt.Fprintf(c.stderr, "掃除の計画を作れませんでした: %v\n", cleanup.Describe(err))
 		return exitError
 	}
 
@@ -392,7 +391,11 @@ func (c *cli) clean(ctx context.Context, args []string) int {
 	if plan.Size.Partial {
 		fmt.Fprint(c.stdout, " 以上 (一部のみ計測)")
 	}
-	fmt.Fprintf(c.stdout, "\n実行      %s\n\n%s\n削除したファイルはごみ箱に入らず、元に戻せません。\n", plan.Command(), target.Note)
+	label := "実行"
+	if plan.Deletes() {
+		label = "削除"
+	}
+	fmt.Fprintf(c.stdout, "\n%s      %s\n\n%s\n削除したファイルはごみ箱に入らず、元に戻せません。\n", label, plan.Command(), target.Note)
 
 	if !c.interactive {
 		fmt.Fprintln(c.stderr, "掃除には確認が必要です。対話できるターミナルから実行してください。")
@@ -407,29 +410,17 @@ func (c *cli) clean(ctx context.Context, args []string) int {
 
 	result, err := engine.Apply(ctx, plan, "cli")
 	if err != nil {
-		fmt.Fprintf(c.stderr, "掃除できませんでした: %v\n", describeApplyError(err))
+		fmt.Fprintf(c.stderr, "掃除できませんでした: %v\n", cleanup.Describe(err))
 		return exitError
 	}
 	fmt.Fprintf(c.stdout, "完了しました。%s → %s\n", storage.Size(result.SizeBefore.Bytes), storage.Size(result.SizeAfter.Bytes))
+	if result.Skipped > 0 {
+		fmt.Fprintf(c.stdout, "使用中などで削除できなかった %d 件と、リンクはそのまま残しました。\n", result.Skipped)
+	}
 	if result.FreeAfter > result.FreeBefore {
 		fmt.Fprintf(c.stdout, "ドライブの空きは %s 増えました (ほかのアプリの読み書きも含みます)。\n", storage.Size(result.FreeAfter-result.FreeBefore))
 	}
 	return exitOK
-}
-
-func describeApplyError(err error) string {
-	switch {
-	case errors.Is(err, cleanup.ErrWrongVersion):
-		return "ホームフォルダで実行した yarn などのバージョンが、この対象に合いません。別のキャッシュを消さないように中止しました。(" + err.Error() + ")"
-	case errors.Is(err, cleanup.ErrBusy):
-		return "ほかの掃除が実行中です。終わってからやり直してください。"
-	case errors.Is(err, cleanup.ErrPlanExpired):
-		return "確認から時間がたちすぎました。もう一度実行してください。"
-	case errors.Is(err, cleanup.ErrPlanChanged):
-		return "確認したあとにツールかフォルダが変わったため中止しました。もう一度実行してください。(" + err.Error() + ")"
-	default:
-		return err.Error()
-	}
 }
 
 func (c *cli) history(args []string) int {

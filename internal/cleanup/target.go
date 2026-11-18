@@ -44,9 +44,12 @@ type Target struct {
 	DefaultBase          string
 	DefaultDir           string
 	SubDir               string
-	// Clean is the tool's own cleanup command, or nil for a target that
-	// Skilli does not clean itself.
+	// Clean is the tool's own cleanup command. Only one of Clean and
+	// Delete is set; with neither, the target is only measured.
 	Clean *Command
+	// Delete lets Skilli remove the folder's contents itself, for a cache
+	// whose tool offers no cleanup command.
+	Delete *Deletion
 	// AcceptMajor, when set, runs the clean tool with --version before a
 	// cleanup and refuses it unless the major version passes. The same
 	// yarn command cleans Yarn 1's cache or Yarn 2+'s depending on which
@@ -75,22 +78,36 @@ type Target struct {
 	// pnpm store path writes a test file to the drive root, which on a
 	// cloud drive such as Google Drive fails or syncs a stray file.
 	RequireDir string
+	// Busy names executables, such as uv.exe or cargo.exe, that hold the
+	// cache while they run. A cleanup is refused while one of them runs,
+	// rather than left to wait for a lock: a server started with uv run can
+	// hold uv's cache for hours, and uv cache prune waits for it.
+	Busy []string
 }
 
-// Cleanable reports whether the target has a cleanup command.
-func (t Target) Cleanable() bool { return t.Clean != nil }
+// Deletion describes what Skilli removes itself.
+type Deletion struct {
+	// Paths are folders inside the target folder whose contents are
+	// removed; empty means the contents of the target folder itself. They
+	// let a deletion skip what is not cache, such as Hugging Face's token.
+	Paths []string
+}
+
+// Cleanable reports whether Skilli can clean the target, by the tool's
+// command or by deleting it.
+func (t Target) Cleanable() bool { return t.Clean != nil || t.Delete != nil }
 
 func (t Target) locatedByCommand() bool { return t.Locate.Name != "" }
 
 // Targets returns the built-in targets in display order.
 //
-// A cleanup command is added only when the tool documents it as removing
-// cache data that it can download or rebuild again, and it runs without a
-// project. Caches the tool already trims on its own (Cargo, Gradle), and
-// folders that hold more than cache (Poetry's virtual environments, Rust
-// toolchains, downloaded models), are only measured. A folder shared by
-// many apps, such as %TEMP%, is left to Windows' own cleanup, which skips
-// files in use.
+// The tool's own cleanup command is preferred whenever one exists and runs
+// without a project. Skilli deletes a cache itself only when the tool
+// offers no such command, and then only the folders that hold cache: never
+// Poetry's virtual environments or Hugging Face's token. Rust toolchains
+// are only measured, since rustup toolchain uninstall removes them. A
+// folder shared by many apps, such as %TEMP%, is left to Windows' own
+// cleanup, which skips files in use.
 func Targets() []Target {
 	return []Target{
 		// Python
@@ -99,6 +116,7 @@ func Targets() []Target {
 			Name:   "uv キャッシュ",
 			Locate: Command{Name: "uv", Args: []string{"cache", "dir"}},
 			Clean:  &Command{Name: "uv", Args: []string{"cache", "prune"}},
+			Busy:   []string{"uv.exe", "uvx.exe"},
 			Note:   "uv cache prune で、どの環境からも使われていないキャッシュだけを削除します。必要になれば再ダウンロードされます。",
 		},
 		{
@@ -109,11 +127,25 @@ func Targets() []Target {
 			Clean:                &Command{Name: "python", Args: []string{"-m", "pip", "cache", "purge"}},
 			Note:                 "pip cache purge で、PATH の python が使う pip のキャッシュをすべて削除します。必要になれば再ダウンロードされます。",
 		},
+		// Poetry's cache-dir also holds the projects' virtual environments
+		// (virtualenvs) by default, so each target names a subfolder.
 		{
 			ID:     "poetry",
-			Name:   "Poetry キャッシュ",
+			Name:   "Poetry のリポジトリキャッシュ",
 			Locate: Command{Name: "poetry", Args: []string{"config", "cache-dir"}},
-			Note:   "計測のみ。Poetry は既定でこのフォルダの中にプロジェクトの仮想環境 (virtualenvs) を作るため、Skilli からは掃除しません。",
+			SubDir: `cache\repositories`,
+			// The confirmation's default is yes, which --no-interaction takes.
+			Clean: &Command{Name: "poetry", Args: []string{"cache", "clear", "--all", "--no-interaction"}},
+			Note:  "poetry cache clear --all で、パッケージの情報などのリポジトリのキャッシュを削除します。プロジェクトの仮想環境は削除しません。",
+		},
+		{
+			ID:     "poetry-artifacts",
+			Name:   "Poetry のダウンロード済みパッケージ",
+			Locate: Command{Name: "poetry", Args: []string{"config", "cache-dir"}},
+			SubDir: "artifacts",
+			Delete: &Deletion{},
+			Busy:   []string{"poetry.exe"},
+			Note:   "Poetry にはこのフォルダを削除するコマンドがないため、Skilli が中身を直接削除します。次のインストールで再ダウンロードされます。プロジェクトの仮想環境は削除しません。",
 		},
 		{
 			ID:     "conda",
@@ -172,7 +204,9 @@ func Targets() []Target {
 			Name:       "Bun キャッシュ",
 			EnvDir:     "BUN_INSTALL_CACHE_DIR",
 			DefaultDir: `.bun\install\cache`,
-			Note:       "計測のみ。bun pm cache rm は package.json のあるフォルダでしか実行できないため、Skilli からは掃除しません。",
+			Delete:     &Deletion{},
+			Busy:       []string{"bun.exe"},
+			Note:       "bun pm cache rm は package.json のあるフォルダでしか実行できないため、Skilli が中身を直接削除します。次のインストールで再ダウンロードされます。",
 		},
 		{
 			ID:     "deno",
@@ -188,7 +222,8 @@ func Targets() []Target {
 			EnvDir:      "PLAYWRIGHT_BROWSERS_PATH",
 			DefaultBase: "LOCALAPPDATA",
 			DefaultDir:  "ms-playwright",
-			Note:        "計測のみ。Playwright がテスト用にダウンロードしたブラウザです。",
+			Delete:      &Deletion{},
+			Note:        "Playwright がテスト用にダウンロードしたブラウザを、Skilli が直接削除します。使うときは npx playwright install でダウンロードし直します。",
 		},
 		// Go
 		{
@@ -196,6 +231,7 @@ func Targets() []Target {
 			Name:   "Go ビルドキャッシュ",
 			Locate: Command{Name: "go", Args: []string{"env", "GOCACHE"}},
 			Clean:  &Command{Name: "go", Args: []string{"clean", "-cache"}},
+			Busy:   []string{"go.exe", "gopls.exe"},
 			Note:   "go clean -cache でビルドキャッシュを削除します。次回のビルドとテストは時間がかかります。",
 		},
 		{
@@ -203,6 +239,7 @@ func Targets() []Target {
 			Name:   "Go モジュールキャッシュ",
 			Locate: Command{Name: "go", Args: []string{"env", "GOMODCACHE"}},
 			Clean:  &Command{Name: "go", Args: []string{"clean", "-modcache"}},
+			Busy:   []string{"go.exe", "gopls.exe"},
 			Note:   "注意: go clean -modcache は、使用中かどうかに関係なくモジュールキャッシュをすべて削除します。すべてのプロジェクトが次のビルドで依存を再ダウンロードし、オフラインではビルドできなくなります。",
 		},
 		// Rust
@@ -212,7 +249,9 @@ func Targets() []Target {
 			EnvDir:     "CARGO_HOME",
 			DefaultDir: ".cargo",
 			SubDir:     "registry",
-			Note:       "計測のみ。Rust 1.88 以降の Cargo は、3 か月使われていないダウンロード済みのファイルを自動で削除します。プロジェクトごとのビルド結果 (target フォルダ) は、そのプロジェクトで cargo clean を実行して削除します。",
+			Delete:     &Deletion{},
+			Busy:       []string{"cargo.exe", "rustc.exe"},
+			Note:       "Cargo には全体を削除するコマンドがないため、Skilli が中身を直接削除します。Cargo の公式ドキュメントでは、このキャッシュはどの部分を削除しても再取得されるとされています。Rust 1.88 以降の Cargo は、3 か月使われていないファイルを自動でも削除します。プロジェクトごとのビルド結果 (target フォルダ) は対象外です。",
 		},
 		{
 			ID:         "cargo-git",
@@ -220,7 +259,9 @@ func Targets() []Target {
 			EnvDir:     "CARGO_HOME",
 			DefaultDir: ".cargo",
 			SubDir:     "git",
-			Note:       "計測のみ。Git リポジトリから取得した依存です。Rust 1.88 以降の Cargo が、使われていないものを自動で削除します。",
+			Delete:     &Deletion{},
+			Busy:       []string{"cargo.exe", "rustc.exe"},
+			Note:       "Git リポジトリから取得した依存を、Skilli が直接削除します。次のビルドで取得し直されます。",
 		},
 		{
 			ID:         "rustup",
@@ -254,13 +295,17 @@ func Targets() []Target {
 			EnvDir:     "GRADLE_USER_HOME",
 			DefaultDir: ".gradle",
 			SubDir:     "caches",
-			Note:       "計測のみ。Gradle は、7 日から 30 日使われていないキャッシュを自動で削除します。",
+			Delete:     &Deletion{},
+			Busy:       []string{"gradle.exe"},
+			Note:       "Gradle には全体を削除するコマンドがないため、Skilli が中身を直接削除します。Gradle のデーモンが使っているファイルは削除できずに残るので、先に gradle --stop を実行してください。Gradle は古いキャッシュを自動でも削除します。",
 		},
 		{
 			ID:         "maven",
 			Name:       "Maven のローカルリポジトリ",
 			DefaultDir: `.m2\repository`,
-			Note:       "計測のみ。全体を削除する公式のコマンドがないため、Skilli からは掃除しません。settings.xml で場所を変えている場合は、既定の場所だけを計測します。",
+			Delete:     &Deletion{},
+			Busy:       []string{"mvn.exe"},
+			Note:       "注意: Maven には全体を削除するコマンドがないため、Skilli が中身を直接削除します。mvn install で入れた自分の成果物も削除され、作り直すまで参照できなくなります。settings.xml で場所を変えている場合は、既定の場所だけが対象です。",
 		},
 		// PHP, Dart
 		{
@@ -293,7 +338,9 @@ func Targets() []Target {
 			Name:       "Hugging Face のキャッシュ",
 			EnvDir:     "HF_HOME",
 			DefaultDir: `.cache\huggingface`,
-			Note:       "計測のみ。ダウンロードしたモデルやデータセットが入っています。不要なものは Hugging Face の CLI で削除します。",
+			// HF_HOME also holds the login token, which must survive.
+			Delete: &Deletion{Paths: []string{"hub", "xet", "assets"}},
+			Note:   "注意: ダウンロードしたモデルやデータセット (hub、xet、assets) を、Skilli が直接削除します。使うときは再ダウンロードになり、大きなモデルは時間がかかります。ログイン用のトークンは削除しません。",
 		},
 		{
 			ID:          "temp",

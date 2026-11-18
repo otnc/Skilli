@@ -67,6 +67,7 @@ func newTestCLI(t *testing.T, stdin string, interactive bool) *testCLI {
 				History:   &cleanup.History{Path: filepath.Join(root, "history.jsonl")},
 				Getenv:    func(string) string { return cache },
 				Home:      func() (string, error) { return root, nil },
+				Running:   func([]string) ([]string, error) { return nil, nil },
 				Now:       time.Now,
 			}, nil
 		},

@@ -8,9 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 
@@ -32,8 +34,33 @@ func New() (*Engine, error) {
 		History:   &History{Path: historyPath},
 		Getenv:    os.Getenv,
 		Home:      os.UserHomeDir,
+		Running:   runningExecutables,
 		Now:       time.Now,
 	}, nil
+}
+
+// runningExecutables returns which of names, compared without case, are
+// executable names of running processes.
+func runningExecutables(names []string) ([]string, error) {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer windows.CloseHandle(snapshot)
+	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
+	var running []string
+	for err = windows.Process32First(snapshot, &entry); err == nil; err = windows.Process32Next(snapshot, &entry) {
+		exe := windows.UTF16ToString(entry.ExeFile[:])
+		for _, name := range names {
+			if strings.EqualFold(exe, name) && !slices.Contains(running, name) {
+				running = append(running, name)
+			}
+		}
+	}
+	if !errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+		return nil, err
+	}
+	return running, nil
 }
 
 type execRunner struct{}
@@ -93,6 +120,10 @@ func command(ctx context.Context, dir, exe string, args []string) *exec.Cmd {
 		// not a terminal, and go may download the toolchain GOTOOLCHAIN
 		// names. The installed versions report the same cache folders.
 		"MISE_AUTO_INSTALL=false", "COREPACK_ENABLE_NETWORK=0", "GOTOOLCHAIN=local",
+		// uv waits 300 s by default for a cache lock that a uv process
+		// started outside Skilli holds. Target.Busy catches most of those
+		// beforehand; give up quickly on the rest.
+		"UV_LOCK_TIMEOUT=10",
 	)
 	// The GUI build has no console, so each console tool would otherwise
 	// flash a window of its own.

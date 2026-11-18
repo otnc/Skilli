@@ -17,17 +17,26 @@ const (
 	StatusRefused   = "refused"
 )
 
-// Entry records one cleanup attempt. It holds the target ID and sizes but
-// no paths, so that the history can be shared without the user name.
+// Method values of an Entry.
+const (
+	MethodCommand = "command"
+	MethodDelete  = "delete"
+)
+
+// Entry records one cleanup attempt. It holds the target ID and sizes, and
+// in Error the home folder is written as ~, so that the history can be
+// shared without the user name.
 type Entry struct {
 	Time       time.Time `json:"time"`
 	Source     string    `json:"source"`
 	Target     string    `json:"target"`
+	Method     string    `json:"method,omitempty"`
 	Status     string    `json:"status"`
 	SizeBefore uint64    `json:"size_before_bytes,omitzero"`
 	SizeAfter  uint64    `json:"size_after_bytes,omitzero"`
 	FreeBefore uint64    `json:"drive_free_before_bytes,omitzero"`
 	FreeAfter  uint64    `json:"drive_free_after_bytes,omitzero"`
+	Skipped    int       `json:"skipped,omitzero"`
 	Error      string    `json:"error,omitempty"`
 }
 
