@@ -4,6 +4,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,5 +117,45 @@ func TestDarkThemeRenders(t *testing.T) {
 	saveSnapshot(t, tt, "caches-dark")
 	if !tt.HasText("20.0 GiB") {
 		t.Errorf("texts = %q", tt.Texts())
+	}
+}
+
+func TestSplitCommand(t *testing.T) {
+	for line, want := range map[string]string{
+		`tool cache clean`:           "tool|cache|clean",
+		`  tool   "C:\My Cache" -y `: `tool|C:\My Cache|-y`,
+		`tool ""`:                    "tool|",
+		``:                           "",
+	} {
+		args, err := splitCommand(line)
+		if got := strings.Join(args, "|"); err != nil || got != want {
+			t.Errorf("splitCommand(%q) = %q, %v; want %q", line, got, err, want)
+		}
+		if line != "" {
+			again, _ := splitCommand(joinCommand(args))
+			if strings.Join(again, "|") != want {
+				t.Errorf("joinCommand does not round-trip %q", line)
+			}
+		}
+	}
+	if _, err := splitCommand(`tool "open`); err == nil {
+		t.Error("an unclosed quote must be an error")
+	}
+}
+
+func TestSettingsListCustomTargetsAndOpenTheForm(t *testing.T) {
+	d := sampleDashboard()
+	d.tab = tabSettings
+	d.cfg.CustomTargets = []config.CustomTarget{{ID: "my-1", Name: "社内ツール", Dir: `C:\tool\cache`, Command: []string{"tool", "clean"}, Method: config.MethodCommandThenDelete}}
+	tt := ui.NewTester(d.render, 600, 1400)
+	if !tt.HasText("社内ツール") {
+		t.Fatalf("texts = %q", tt.Texts())
+	}
+	if err := tt.Click("追加…"); err != nil {
+		t.Fatal(err)
+	}
+	saveSnapshot(t, tt, "settings-form")
+	if d.form == nil || !tt.HasText("掃除の方法") {
+		t.Fatalf("the form must open; texts = %q", tt.Texts())
 	}
 }

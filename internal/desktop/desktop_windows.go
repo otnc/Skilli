@@ -53,12 +53,19 @@ type dashboard struct {
 	version string
 	// tab is the page shown: tabDrives, tabCaches or tabSettings.
 	tab int
+	// form is the custom target being added or edited, or nil.
+	form *customForm
 }
 
 // Run starts the MyGo main loop. Call it from the main goroutine.
 func Run(version string, background, checkUpdates bool) error {
 	mygo.App.SetName("Skilli")
 	mygo.App.SetVersion(version)
+	// Hand over to a clean instance before taking the single-instance
+	// lock, which the new instance needs.
+	if redirectionGuardEnforced() && relaunchThroughShell() == nil {
+		return nil
+	}
 	if !mygo.App.RequestSingleInstanceLock() {
 		return nil
 	}

@@ -116,10 +116,13 @@ func (d *dashboard) renderDrives(c *ui.Context) {
 				ui.Text(c, drive.DisplayPath()).FontSize(16).Bold()
 				ui.Spacer(c)
 				if drive.Measured() {
-					free := ui.Text(c, "空き "+storage.GiB(drive.FreeBytes)).FontSize(16).Bold()
-					if low {
-						free.TextColor(t.Warning)
-					}
+					ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
+						free := ui.Text(c, "空き "+storage.GiB(drive.FreeBytes)).FontSize(16).Bold()
+						if low {
+							free.TextColor(t.Warning)
+						}
+						muted(c, "使用 "+storage.GiB(drive.CapacityBytes-min(drive.FreeBytes, drive.CapacityBytes)))
+					})
 				}
 			})
 			if !drive.Measured() {
@@ -132,7 +135,7 @@ func (d *dashboard) renderDrives(c *ui.Context) {
 				&ui.MeterLevels{Warning: max(capacity-threshold*1.5, 0), Critical: max(capacity-threshold, 0)}).
 				FillWidth().Label(drive.DisplayPath() + " の使用量")
 			ui.Row(c).AlignItems(ui.Center).Children(func() {
-				muted(c, fmt.Sprintf("%s 中 %.0f%% 使用", storage.GiB(drive.CapacityBytes), drive.UsedRatio()*100))
+				muted(c, fmt.Sprintf("合計 %s  ・  %.0f%% 使用", storage.GiB(drive.CapacityBytes), drive.UsedRatio()*100))
 				ui.Spacer(c)
 				switch {
 				case ignored:
@@ -226,11 +229,11 @@ func (d *dashboard) renderCaches(c *ui.Context) {
 }
 
 func (d *dashboard) renderCacheCard(c *ui.Context, scan cleanup.Scan) {
-	target, _ := cleanup.FindTarget(scan.ID)
+	target, _ := d.findTarget(scan.ID)
 	card(c, func() {
 		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, scan.Name).Bold().Grow(1).Ellipsis("…")
-			size := storage.Size(scan.Size.Bytes)
+			size := scan.Size.String()
 			if scan.Size.Partial {
 				size += " 以上"
 			}
@@ -243,16 +246,8 @@ func (d *dashboard) renderCacheCard(c *ui.Context, scan cleanup.Scan) {
 			}
 			ui.Spacer(c)
 			switch {
-			case target.SettingsURI != "":
-				if ui.Button(c, "Windows の設定で削除…").Tooltip(target.Note).Clicked() {
-					_ = mygo.Shell.OpenExternal(target.SettingsURI)
-				}
 			case target.Cleanable():
-				method := "公式コマンド"
-				if target.Delete != nil {
-					method = "直接削除"
-				}
-				muted(c, method).Tooltip(target.Note)
+				muted(c, methodLabel(target)).Tooltip(target.Note)
 				label := "削除…"
 				if d.caches.cleaning == scan.ID {
 					label = "削除しています…"
@@ -265,6 +260,25 @@ func (d *dashboard) renderCacheCard(c *ui.Context, scan cleanup.Scan) {
 			}
 		})
 	})
+}
+
+// methodLabel names how a target is cleaned, in the order tried.
+func methodLabel(t cleanup.Target) string {
+	var label string
+	switch {
+	case t.Clean != nil && t.Delete != nil && t.PreferDelete:
+		label = "直接削除 (使えないときは公式コマンド)"
+	case t.Clean != nil && t.Delete != nil:
+		label = "公式コマンド (使えないときは直接削除)"
+	case t.Clean != nil:
+		label = "公式コマンド"
+	default:
+		label = "直接削除"
+	}
+	if t.Custom {
+		label = strings.Replace(label, "公式コマンド", "コマンド", 1) + "  ・  自分で追加"
+	}
+	return label
 }
 
 func (d *dashboard) renderSettings(c *ui.Context) {
@@ -308,6 +322,8 @@ func (d *dashboard) renderSettings(c *ui.Context) {
 			}
 		})
 	}
+
+	d.renderCustomTargets(c)
 
 	sectionTitle(c, "起動")
 	card(c, func() {

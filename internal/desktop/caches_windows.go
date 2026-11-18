@@ -55,6 +55,18 @@ func (v *cacheView) withStatus(status string) []cleanup.Scan {
 	return scans
 }
 
+func (d *dashboard) customTargets() []cleanup.Target {
+	var targets []cleanup.Target
+	for _, custom := range d.cfg.CustomTargets {
+		targets = append(targets, cleanup.FromCustom(custom))
+	}
+	return targets
+}
+
+func (d *dashboard) findTarget(id string) (cleanup.Target, bool) {
+	return cleanup.Find(d.customTargets(), id)
+}
+
 func (d *dashboard) busy() bool {
 	return d.caches.scanning || d.caches.cleaning != ""
 }
@@ -68,7 +80,7 @@ func (d *dashboard) scanCaches() {
 		roots = append(roots, drive.Root)
 	}
 	home, _ := os.UserHomeDir()
-	targets := cleanup.TargetsFor(roots, home)
+	targets := append(cleanup.TargetsFor(roots, home), d.customTargets()...)
 	d.caches.scanning = true
 	d.caches.scans = nil
 	d.caches.scanned, d.caches.total = 0, len(targets)
@@ -120,13 +132,16 @@ func (d *dashboard) cleanTarget(target cleanup.Target) {
 			cleanupMessage(target.Name+" を掃除できません", cleanup.Describe(err))
 			return
 		}
-		size := storage.Size(plan.Size.Bytes)
+		size := plan.Size.String()
 		if plan.Size.Partial {
 			size += " 以上"
 		}
 		how := "実行するコマンド: " + plan.Command()
 		if plan.Deletes() {
 			how = "Skilli が中身を直接削除するフォルダ:\n  " + joinLines(plan.Scope)
+		}
+		if plan.Fallback != "" {
+			how += "\n\n優先する方法が使えないため、こちらに切り替えました:\n" + plan.Fallback
 		}
 		answer, err := mygo.Dialog.Message(mygo.MessageOptions{
 			Type:    mygo.MessageWarning,
@@ -149,6 +164,9 @@ func (d *dashboard) cleanTarget(target cleanup.Target) {
 		detail := fmt.Sprintf("サイズ: %s → %s", storage.Size(result.SizeBefore.Bytes), storage.Size(result.SizeAfter.Bytes))
 		if result.FreeAfter > result.FreeBefore {
 			detail += fmt.Sprintf("\nドライブの空き: %s 増加 (ほかのアプリの読み書きも含みます)", storage.Size(result.FreeAfter-result.FreeBefore))
+		}
+		if result.Kept > 0 {
+			detail += fmt.Sprintf("\n条件に合わない %d 件 (新しいファイルなど) は残しました。", result.Kept)
 		}
 		if result.Skipped > 0 {
 			detail += fmt.Sprintf("\n使用中などで削除できなかった %d 件と、リンクはそのまま残しました。", result.Skipped)
