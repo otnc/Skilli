@@ -61,6 +61,17 @@ func CheckOnDisk(dir string) error {
 	return nil
 }
 
+// IsAppExecutionAlias reports whether exe is in the WindowsApps folder of
+// localAppData. Windows puts app execution aliases there, such as the
+// python.exe that opens the Microsoft Store when Python is not installed,
+// so a tool found there is treated as not installed.
+func IsAppExecutionAlias(exe, localAppData string) bool {
+	if localAppData == "" {
+		return false
+	}
+	return isWithin(exe, filepath.Join(localAppData, "Microsoft", "WindowsApps"))
+}
+
 // isWithin reports whether path is strictly inside dir.
 func isWithin(path, dir string) bool {
 	rel, err := filepath.Rel(dir, path)

@@ -44,7 +44,13 @@ func (execRunner) LookPath(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Abs(exe)
+	if exe, err = filepath.Abs(exe); err != nil {
+		return "", err
+	}
+	if IsAppExecutionAlias(exe, os.Getenv("LOCALAPPDATA")) {
+		return "", fmt.Errorf("%s: %w", exe, exec.ErrNotFound)
+	}
+	return exe, nil
 }
 
 func (execRunner) Output(ctx context.Context, exe string, args []string) (string, error) {
@@ -68,6 +74,13 @@ func (execRunner) Run(ctx context.Context, exe string, args []string) (string, e
 
 func command(ctx context.Context, exe string, args []string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, exe, args...)
+	// Run in the home folder rather than wherever the CLI was started. In a
+	// project folder, go.mod could make go download a toolchain, and mise,
+	// uv or Poetry could read the project's settings and report another
+	// cache, so the GUI and the CLI would disagree.
+	if home, err := os.UserHomeDir(); err == nil {
+		cmd.Dir = home
+	}
 	// The GUI build has no console, so each console tool would otherwise
 	// flash a window of its own.
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
