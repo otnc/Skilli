@@ -25,3 +25,5 @@ jobs:
       - run: go test ./...
       - run: ./scripts/build.ps1
       - run: ./dist/skilli.exe status --json
+      - run: ./scripts/release/install-inno.ps1
+      - run: ./scripts/build.ps1 -Installer
