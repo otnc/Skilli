@@ -9,8 +9,6 @@ trim_trailing_whitespace = true
 [*.go]
 indent_style = tab
 
-[*.iss]
-end_of_line = crlf
-
-[TERMS.txt]
+# Keep in sync with the line endings fixed in .gitattributes.
+[{*.iss,TERMS.txt,*.bat,*.cmd}]
 end_of_line = crlf

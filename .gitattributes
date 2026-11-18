@@ -1,3 +1,20 @@
+# Normalize text to LF by default.
 * text=auto eol=lf
+
+# Read by bash, which fails on the CR of CRLF (for example in the release workflow).
+*.sh text eol=lf
+
+# Read by Windows tools that expect CRLF: Inno Setup compiles .iss and shows
+# TERMS.txt on the installer's license page, and cmd.exe misreads LF batch files.
 *.iss text eol=crlf
 TERMS.txt text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never convert line endings in binary files.
+*.png binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.zip binary
+*.gz binary
