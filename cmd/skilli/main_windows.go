@@ -275,10 +275,16 @@ func (c *cli) scan(ctx context.Context, args []string) int {
 	}
 	report := scanReport{SchemaVersion: 1, Targets: []cleanup.Scan{}}
 	partial := false
+	listingAll := flags.NArg() == 0
 	for _, target := range targets {
 		targetCtx, cancel := context.WithTimeout(ctx, scanTimeout)
 		result := engine.Scan(targetCtx, target)
 		cancel()
+		// Most drives have no pnpm store; list a drive's copy only when it
+		// has one, unless the user asked for that ID.
+		if listingAll && target.IsDriveCopy() && result.Status == cleanup.Missing {
+			continue
+		}
 		if result.Status == cleanup.Failed || result.Size != nil && result.Size.Partial {
 			partial = true
 		}
@@ -296,7 +302,7 @@ func (c *cli) scan(ctx context.Context, args []string) int {
 		}
 	} else {
 		for _, result := range report.Targets {
-			fmt.Fprintf(c.stdout, "%-9s %s  %s\n", result.ID, result.Name, describeScan(result))
+			fmt.Fprintf(c.stdout, "%-12s %s  %s\n", result.ID, result.Name, describeScan(result))
 		}
 	}
 	if partial {
@@ -321,7 +327,14 @@ func describeScan(result cleanup.Scan) string {
 
 func (c *cli) selectTargets(ids []string) ([]cleanup.Target, bool) {
 	if len(ids) == 0 {
-		return cleanup.Targets(), true
+		var roots []string
+		if snapshot, err := c.readDrives(); err == nil {
+			for _, drive := range snapshot.Drives {
+				roots = append(roots, drive.Root)
+			}
+		}
+		home, _ := os.UserHomeDir()
+		return cleanup.TargetsFor(roots, home), true
 	}
 	var targets []cleanup.Target
 	for _, id := range ids {

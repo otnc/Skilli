@@ -29,10 +29,10 @@ type fakeRunner struct {
 }
 
 func (f *fakeRunner) LookPath(string) (string, error) { return f.exe, nil }
-func (f *fakeRunner) Output(context.Context, string, []string) (string, error) {
+func (f *fakeRunner) Output(context.Context, string, string, []string) (string, error) {
 	return f.dir, nil
 }
-func (f *fakeRunner) Run(context.Context, string, []string) (string, error) {
+func (f *fakeRunner) Run(context.Context, string, string, []string) (string, error) {
 	f.runs++
 	return "", nil
 }
@@ -66,6 +66,7 @@ func newTestCLI(t *testing.T, stdin string, interactive bool) *testCLI {
 				Lock:      func() (func(), error) { return func() {}, nil },
 				History:   &cleanup.History{Path: filepath.Join(root, "history.jsonl")},
 				Getenv:    func(string) string { return cache },
+				Home:      func() (string, error) { return root, nil },
 				Now:       time.Now,
 			}, nil
 		},

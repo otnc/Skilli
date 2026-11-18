@@ -23,14 +23,14 @@ type fakeRunner struct {
 
 func (f *fakeRunner) LookPath(string) (string, error) { return f.exe, nil }
 
-func (f *fakeRunner) Output(context.Context, string, []string) (string, error) {
+func (f *fakeRunner) Output(_ context.Context, _, _ string, _ []string) (string, error) {
 	if f.outputErr != nil {
 		return "", f.outputErr
 	}
 	return f.dir + "\r\n", nil
 }
 
-func (f *fakeRunner) Run(_ context.Context, exe string, args []string) (string, error) {
+func (f *fakeRunner) Run(_ context.Context, dir, exe string, args []string) (string, error) {
 	f.runs = append(f.runs, append([]string{exe}, args...))
 	if f.onRun != nil {
 		f.onRun()
@@ -72,6 +72,7 @@ func newFixture(t *testing.T) *fixture {
 		Lock:      func() (func(), error) { return func() {}, nil },
 		History:   &History{Path: f.history},
 		Getenv:    func(string) string { return "" },
+		Home:      func() (string, error) { return root, nil },
 		Now:       func() time.Time { return f.now },
 	}
 	return f
@@ -279,10 +280,151 @@ func TestIsAppExecutionAlias(t *testing.T) {
 	}
 }
 
-func TestCleanCommandsUseTheLocatingTool(t *testing.T) {
+func TestTargetsAreWellFormed(t *testing.T) {
+	seen := map[string]bool{}
 	for _, target := range Targets() {
-		if target.Clean != nil && target.Clean.Name != target.Locate.Name {
+		if seen[target.ID] {
+			t.Errorf("duplicate ID %s", target.ID)
+		}
+		seen[target.ID] = true
+		byCommand := target.locatedByCommand()
+		byEnvironment := target.EnvDir != "" || target.DefaultDir != ""
+		if byCommand == byEnvironment {
+			t.Errorf("%s must be located either by a command or by the environment", target.ID)
+		}
+		if byCommand && target.Clean != nil && target.Clean.Name != target.Locate.Name {
 			t.Errorf("%s locates with %s but cleans with %s", target.ID, target.Locate.Name, target.Clean.Name)
+		}
+		if target.Note == "" {
+			t.Errorf("%s has no note", target.ID)
+		}
+	}
+}
+
+func TestLocateFromEnvironmentWithDefaultsAndSubDir(t *testing.T) {
+	f := newFixture(t)
+	home, _ := f.engine.Home()
+	cargo, _ := FindTarget("cargo")
+	os.MkdirAll(filepath.Join(home, ".cargo", "registry"), 0o700)
+	if loc := f.engine.Locate(t.Context(), cargo); loc.Status != Found || !samePath(loc.Dir, filepath.Join(home, ".cargo", "registry")) {
+		t.Fatalf("default CARGO_HOME: %+v", loc)
+	}
+
+	custom := filepath.Join(home, "custom-cargo")
+	os.MkdirAll(filepath.Join(custom, "registry"), 0o700)
+	f.engine.Getenv = func(name string) string {
+		if name == "CARGO_HOME" {
+			return custom
+		}
+		return ""
+	}
+	if loc := f.engine.Locate(t.Context(), cargo); loc.Status != Found || !samePath(loc.Dir, filepath.Join(custom, "registry")) {
+		t.Fatalf("CARGO_HOME set: %+v", loc)
+	}
+
+	pub, _ := FindTarget("dart-pub")
+	if loc := f.engine.Locate(t.Context(), pub); loc.Status != Failed {
+		t.Fatalf("pub without LOCALAPPDATA must fail, got %+v", loc)
+	}
+}
+
+func TestPlanForEnvironmentTargetResolvesCleanCommand(t *testing.T) {
+	f := newFixture(t)
+	f.engine.Getenv = func(name string) string {
+		if name == "PUB_CACHE" {
+			return f.cache
+		}
+		return ""
+	}
+	pub, _ := FindTarget("dart-pub")
+	plan, err := f.engine.NewPlan(t.Context(), pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Executable != f.runner.exe || !samePath(plan.Dir, f.cache) {
+		t.Fatalf("plan = %+v", plan)
+	}
+	if _, err := f.engine.Apply(t.Context(), plan, "cli"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.runner.runs[0][1:], " "); got != "pub cache clean --force" {
+		t.Fatalf("ran %q", got)
+	}
+}
+
+func TestPerDriveCopies(t *testing.T) {
+	targets := TargetsFor([]string{`C:\`, `D:\`, `E:\`}, `C:\Users\me`)
+	var ids []string
+	for _, target := range targets {
+		if target.IsDriveCopy() {
+			ids = append(ids, target.ID)
+		}
+	}
+	if strings.Join(ids, ",") != "pnpm-d,pnpm-e" {
+		t.Fatalf("drive copies = %v", ids)
+	}
+	copyD, ok := FindTarget("pnpm-d")
+	if !ok || copyD.WorkDir != `D:\` || copyD.Name != "pnpm ストア (D:)" || copyD.Clean == nil {
+		t.Fatalf("FindTarget(pnpm-d) = %+v, %v", copyD, ok)
+	}
+	for _, id := range []string{"uv-d", "pnpm-", "pnpm-dd", "pnpm-1"} {
+		if _, ok := FindTarget(id); ok {
+			t.Errorf("FindTarget(%q) must fail", id)
+		}
+	}
+}
+
+func TestCommandsRunInTheTargetWorkDir(t *testing.T) {
+	f := newFixture(t)
+	var dirs []string
+	f.engine.Runner = &dirRecorder{fakeRunner: f.runner, dirs: &dirs}
+	copyD, _ := FindTarget("pnpm-d")
+	if copyD.RequireDir != `D:\.pnpm-store` {
+		t.Fatalf("RequireDir = %q", copyD.RequireDir)
+	}
+
+	copyD.RequireDir = filepath.Join(filepath.Dir(f.cache), "no-store-here")
+	if loc := f.engine.Locate(t.Context(), copyD); loc.Status != Missing || len(dirs) != 0 {
+		t.Fatalf("a drive without a store must be missing without running pnpm: %+v, dirs = %q", loc, dirs)
+	}
+
+	copyD.RequireDir = f.cache
+	f.engine.Locate(t.Context(), copyD)
+	f.engine.Locate(t.Context(), uvTarget(t))
+	if len(dirs) != 2 || dirs[0] != `D:\` || dirs[1] != "" {
+		t.Fatalf("dirs = %q", dirs)
+	}
+}
+
+type dirRecorder struct {
+	*fakeRunner
+	dirs *[]string
+}
+
+func (r *dirRecorder) Output(ctx context.Context, dir, exe string, args []string) (string, error) {
+	*r.dirs = append(*r.dirs, dir)
+	return r.fakeRunner.Output(ctx, dir, exe, args)
+}
+
+func TestParsers(t *testing.T) {
+	nuget := "Welcome to .NET!\r\nglobal-packages: C:\\Users\\me\\.nuget\\packages\\\r\n"
+	if got, err := valueAfter("global-packages:")(nuget); err != nil || got != `C:\Users\me\.nuget\packages\` {
+		t.Errorf("nuget = %q, %v", got, err)
+	}
+	deno := "DENO_DIR location: \"C:\\Users\\me\\AppData\\Local\\deno\"\nRemote modules cache: \"x\"\n"
+	if got, err := valueAfter("DENO_DIR location:")(deno); err != nil || got != `C:\Users\me\AppData\Local\deno` {
+		t.Errorf("deno = %q, %v", got, err)
+	}
+	if _, err := valueAfter("global-packages:")("nothing here"); err == nil {
+		t.Error("a missing label must be an error")
+	}
+	conda := `{"pkgs_dirs": ["C:\\Users\\me\\miniconda3\\pkgs", "C:\\Users\\me\\.conda\\pkgs"], "envs": []}`
+	if got, err := firstOfJSONList("pkgs_dirs")(conda); err != nil || got != `C:\Users\me\miniconda3\pkgs` {
+		t.Errorf("conda = %q, %v", got, err)
+	}
+	for _, bad := range []string{`not json`, `{"pkgs_dirs": []}`, `{"pkgs_dirs": [1]}`} {
+		if _, err := firstOfJSONList("pkgs_dirs")(bad); err == nil {
+			t.Errorf("conda %q must be an error", bad)
 		}
 	}
 }

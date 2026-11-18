@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -37,11 +38,20 @@ func (d *dashboard) scanCaches() {
 	d.caches.scans = nil
 	d.invalidate()
 	engine := d.caches.engine
+	var roots []string
+	for _, drive := range d.snapshot.Drives {
+		roots = append(roots, drive.Root)
+	}
+	home, _ := os.UserHomeDir()
+	targets := cleanup.TargetsFor(roots, home)
 	go func() {
-		for _, target := range cleanup.Targets() {
+		for _, target := range targets {
 			ctx, cancel := context.WithTimeout(context.Background(), scanTimeout)
 			result := engine.Scan(ctx, target)
 			cancel()
+			if target.IsDriveCopy() && result.Status == cleanup.Missing {
+				continue
+			}
 			mygo.RunOnMain(func() {
 				d.caches.scans = append(d.caches.scans, result)
 				d.invalidate()

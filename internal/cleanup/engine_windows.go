@@ -31,6 +31,7 @@ func New() (*Engine, error) {
 		Lock:      lockCleanup,
 		History:   &History{Path: historyPath},
 		Getenv:    os.Getenv,
+		Home:      os.UserHomeDir,
 		Now:       time.Now,
 	}, nil
 }
@@ -53,8 +54,8 @@ func (execRunner) LookPath(name string) (string, error) {
 	return exe, nil
 }
 
-func (execRunner) Output(ctx context.Context, exe string, args []string) (string, error) {
-	cmd := command(ctx, exe, args)
+func (execRunner) Output(ctx context.Context, dir, exe string, args []string) (string, error) {
+	cmd := command(ctx, dir, exe, args)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -64,23 +65,27 @@ func (execRunner) Output(ctx context.Context, exe string, args []string) (string
 	return string(out), nil
 }
 
-func (execRunner) Run(ctx context.Context, exe string, args []string) (string, error) {
-	out, err := command(ctx, exe, args).CombinedOutput()
+func (execRunner) Run(ctx context.Context, dir, exe string, args []string) (string, error) {
+	out, err := command(ctx, dir, exe, args).CombinedOutput()
 	if err != nil {
 		return string(out), withOutput(err, string(out))
 	}
 	return string(out), nil
 }
 
-func command(ctx context.Context, exe string, args []string) *exec.Cmd {
+func command(ctx context.Context, dir, exe string, args []string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, exe, args...)
-	// Run in the home folder rather than wherever the CLI was started. In a
-	// project folder, go.mod could make go download a toolchain, and mise,
-	// uv or Poetry could read the project's settings and report another
-	// cache, so the GUI and the CLI would disagree.
-	if home, err := os.UserHomeDir(); err == nil {
+	// Run in dir, or the home folder, rather than wherever the CLI was
+	// started. In a project folder, go.mod could make go download a
+	// toolchain, and mise, uv or Poetry could read the project's settings
+	// and report another cache, so the GUI and the CLI would disagree.
+	cmd.Dir = dir
+	if home, err := os.UserHomeDir(); err == nil && dir == "" {
 		cmd.Dir = home
 	}
+	// Plain output keeps the lines that Target.Parse reads free of color
+	// codes and of the .NET SDK's first-run banner.
+	cmd.Env = append(os.Environ(), "NO_COLOR=1", "DOTNET_NOLOGO=1")
 	// The GUI build has no console, so each console tool would otherwise
 	// flash a window of its own.
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}

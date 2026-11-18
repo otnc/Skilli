@@ -48,9 +48,9 @@ type Runner interface {
 	// Output runs exe and returns its standard output. Like Run, it runs
 	// in a fixed directory, not the caller's, so that a project's own
 	// settings cannot change the result.
-	Output(ctx context.Context, exe string, args []string) (string, error)
+	Output(ctx context.Context, dir, exe string, args []string) (string, error)
 	// Run runs exe and returns its combined output for error messages.
-	Run(ctx context.Context, exe string, args []string) (string, error)
+	Run(ctx context.Context, dir, exe string, args []string) (string, error)
 }
 
 // Engine locates, measures and cleans targets.
@@ -64,6 +64,7 @@ type Engine struct {
 	Lock    func() (unlock func(), err error)
 	History *History
 	Getenv  func(string) string
+	Home    func() (string, error)
 	Now     func() time.Time
 
 	mu      sync.Mutex
@@ -82,8 +83,19 @@ type Location struct {
 // Locate finds the folder of t by asking its tool or reading its variable.
 func (e *Engine) Locate(ctx context.Context, t Target) Location {
 	loc := Location{Target: t}
-	if t.EnvDir != "" {
-		loc.Dir = e.Getenv(t.EnvDir)
+	if t.RequireDir != "" {
+		if _, err := os.Stat(t.RequireDir); err != nil {
+			loc.Status = Missing
+			return loc
+		}
+	}
+	if !t.locatedByCommand() {
+		dir, err := e.folderFromEnvironment(t)
+		if err != nil {
+			loc.Status, loc.Error = Failed, err.Error()
+			return loc
+		}
+		loc.Dir = dir
 	} else {
 		exe, err := e.Runner.LookPath(t.Locate.Name)
 		if err != nil {
@@ -93,7 +105,7 @@ func (e *Engine) Locate(ctx context.Context, t Target) Location {
 		loc.Executable = exe
 		ctx, cancel := context.WithTimeout(ctx, LocateTimeout)
 		defer cancel()
-		out, err := e.Runner.Output(ctx, exe, t.Locate.Args)
+		out, err := e.Runner.Output(ctx, t.WorkDir, exe, t.Locate.Args)
 		if err != nil && t.MissingIfLocateFails && ctx.Err() == nil {
 			loc.Status = Missing
 			return loc
@@ -103,6 +115,15 @@ func (e *Engine) Locate(ctx context.Context, t Target) Location {
 			return loc
 		}
 		loc.Dir = strings.TrimSpace(out)
+		if t.Parse != nil {
+			if loc.Dir, err = t.Parse(out); err != nil {
+				loc.Status, loc.Error = Failed, err.Error()
+				return loc
+			}
+		}
+	}
+	if loc.Dir != "" && t.SubDir != "" {
+		loc.Dir = filepath.Join(loc.Dir, t.SubDir)
 	}
 	if loc.Dir == "" || strings.ContainsAny(loc.Dir, "\r\n") || !filepath.IsAbs(loc.Dir) {
 		loc.Status, loc.Error = Failed, fmt.Sprintf("unexpected folder %q", loc.Dir)
@@ -116,6 +137,28 @@ func (e *Engine) Locate(ctx context.Context, t Target) Location {
 	}
 	loc.Status = Found
 	return loc
+}
+
+func (e *Engine) folderFromEnvironment(t Target) (string, error) {
+	if t.EnvDir != "" {
+		if dir := e.Getenv(t.EnvDir); dir != "" {
+			return dir, nil
+		}
+	}
+	if t.DefaultDir == "" {
+		return "", fmt.Errorf("%s is not set", t.EnvDir)
+	}
+	var base string
+	if t.DefaultBase == "" {
+		home, err := e.Home()
+		if err != nil {
+			return "", err
+		}
+		base = home
+	} else if base = e.Getenv(t.DefaultBase); base == "" {
+		return "", fmt.Errorf("%s is not set", t.DefaultBase)
+	}
+	return filepath.Join(base, t.DefaultDir), nil
 }
 
 // Scan is the measurement of one target.
@@ -181,7 +224,14 @@ func (e *Engine) NewPlan(ctx context.Context, t Target) (*Plan, error) {
 	if err := e.checkFolder(scan.Dir); err != nil {
 		return nil, err
 	}
-	info, err := os.Stat(scan.Executable)
+	exe := scan.Executable
+	if !t.locatedByCommand() {
+		var err error
+		if exe, err = e.Runner.LookPath(t.Clean.Name); err != nil {
+			return nil, fmt.Errorf("%s was not found: %w", t.Clean.Name, err)
+		}
+	}
+	info, err := os.Stat(exe)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +240,7 @@ func (e *Engine) NewPlan(ctx context.Context, t Target) (*Plan, error) {
 		ID:         uuid.New().String(),
 		Target:     t,
 		Dir:        scan.Dir,
-		Executable: scan.Executable,
+		Executable: exe,
 		exeInfo:    info,
 		Size:       *scan.Size,
 		CreatedAt:  now,
@@ -268,7 +318,7 @@ func (e *Engine) apply(ctx context.Context, p *Plan) (Result, error) {
 	}
 	runCtx, cancel := context.WithTimeout(ctx, CleanTimeout)
 	defer cancel()
-	result.Output, err = e.Runner.Run(runCtx, p.Executable, p.Target.Clean.Args)
+	result.Output, err = e.Runner.Run(runCtx, p.Target.WorkDir, p.Executable, p.Target.Clean.Args)
 	if err != nil {
 		if runCtx.Err() != nil {
 			err = fmt.Errorf("%s did not finish within %s: %w", p.Target.Clean.Name, CleanTimeout, err)

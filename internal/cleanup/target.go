@@ -6,7 +6,13 @@
 // tool, its executable and its folder are still the ones the user saw.
 package cleanup
 
-import "slices"
+import (
+	"encoding/json/v2"
+	"fmt"
+	"path/filepath"
+	"slices"
+	"strings"
+)
 
 // Command is an executable name looked up in PATH and its arguments.
 type Command struct {
@@ -15,16 +21,27 @@ type Command struct {
 }
 
 // Target is a folder Skilli can measure and possibly clean.
+//
+// The folder comes from one of two places. With Locate set, the tool
+// prints it. Otherwise it is the environment variable EnvDir, or, when
+// that is unset, DefaultDir under the folder in the environment variable
+// DefaultBase (the user's home when DefaultBase is empty). SubDir is then
+// joined to it in either case.
 type Target struct {
 	ID   string
 	Name string
-	// Locate prints the folder on stdout. Ignored when EnvDir is set.
+	// Locate prints the folder.
 	Locate Command
+	// Parse extracts the folder from Locate's output; nil takes the whole
+	// output as the path.
+	Parse func(output string) (string, error)
 	// MissingIfLocateFails treats a failing Locate as the tool being absent,
 	// for commands such as python -m pip that fail when pip is not installed.
 	MissingIfLocateFails bool
-	// EnvDir names an environment variable that holds the folder.
-	EnvDir string
+	EnvDir               string
+	DefaultBase          string
+	DefaultDir           string
+	SubDir               string
 	// Clean is the tool's own cleanup command, or nil for a target that
 	// Skilli does not clean itself.
 	Clean *Command
@@ -33,46 +50,46 @@ type Target struct {
 	SettingsURI string
 	// Note tells the user what the cleanup removes and what it costs.
 	Note string
+	// PerDrive marks a tool that keeps one cache per drive and acts on the
+	// one of the drive it runs on, as pnpm does to hard-link packages.
+	// TargetsFor adds a copy of such a target for each other drive.
+	PerDrive bool
+	// DriveStore is the folder at a drive root where a per-drive tool
+	// keeps that drive's cache by default.
+	DriveStore string
+	// WorkDir is where the target's commands run; empty means the user's
+	// home. A per-drive copy runs at the root of its drive.
+	WorkDir string
+	// RequireDir must exist before any command runs; otherwise the target
+	// is missing. A per-drive copy of pnpm requires X:\.pnpm-store, because
+	// pnpm store path writes a test file to the drive root, which on a
+	// cloud drive such as Google Drive fails or syncs a stray file.
+	RequireDir string
 }
 
 // Cleanable reports whether the target has a cleanup command.
 func (t Target) Cleanable() bool { return t.Clean != nil }
 
+func (t Target) locatedByCommand() bool { return t.Locate.Name != "" }
+
 // Targets returns the built-in targets in display order.
 //
 // A cleanup command is added only when the tool documents it as removing
-// cache data that it can download or rebuild again. A folder shared by many
-// apps, such as %TEMP%, is left to Windows' own cleanup, which skips files
-// in use.
+// cache data that it can download or rebuild again, and it runs without a
+// project. Caches the tool already trims on its own (Cargo, Gradle), and
+// folders that hold more than cache (Poetry's virtual environments, Rust
+// toolchains, downloaded models), are only measured. A folder shared by
+// many apps, such as %TEMP%, is left to Windows' own cleanup, which skips
+// files in use.
 func Targets() []Target {
 	return []Target{
+		// Python
 		{
 			ID:     "uv",
 			Name:   "uv キャッシュ",
 			Locate: Command{Name: "uv", Args: []string{"cache", "dir"}},
 			Clean:  &Command{Name: "uv", Args: []string{"cache", "prune"}},
 			Note:   "uv cache prune で、どの環境からも使われていないキャッシュだけを削除します。必要になれば再ダウンロードされます。",
-		},
-		{
-			ID:     "go-build",
-			Name:   "Go ビルドキャッシュ",
-			Locate: Command{Name: "go", Args: []string{"env", "GOCACHE"}},
-			Clean:  &Command{Name: "go", Args: []string{"clean", "-cache"}},
-			Note:   "go clean -cache でビルドキャッシュを削除します。次回のビルドとテストは時間がかかります。",
-		},
-		{
-			ID:     "pnpm",
-			Name:   "pnpm ストア",
-			Locate: Command{Name: "pnpm", Args: []string{"store", "path"}},
-			Clean:  &Command{Name: "pnpm", Args: []string{"store", "prune"}},
-			Note:   "pnpm store prune で、どのプロジェクトからも参照されていないパッケージを削除します。pnpm install の実行中は使わないでください。",
-		},
-		{
-			ID:     "npm",
-			Name:   "npm キャッシュ",
-			Locate: Command{Name: "npm", Args: []string{"config", "get", "cache"}},
-			Clean:  &Command{Name: "npm", Args: []string{"cache", "verify"}},
-			Note:   "npm cache verify で、キャッシュの整合性を確かめ、不要になったデータだけを削除します。空く容量は少ないことがあります。",
 		},
 		{
 			ID:                   "pip",
@@ -89,11 +106,69 @@ func Targets() []Target {
 			Note:   "計測のみ。Poetry は既定でこのフォルダの中にプロジェクトの仮想環境 (virtualenvs) を作るため、Skilli からは掃除しません。",
 		},
 		{
-			ID:     "mise",
-			Name:   "mise キャッシュ",
-			Locate: Command{Name: "mise", Args: []string{"cache", "path"}},
-			Clean:  &Command{Name: "mise", Args: []string{"cache", "prune"}},
-			Note:   "mise cache prune で、最近使われていないキャッシュ (バージョンの一覧やリリースの情報など) だけを削除します。インストール済みのツールは削除しません。",
+			ID:     "conda",
+			Name:   "conda パッケージキャッシュ",
+			Locate: Command{Name: "conda", Args: []string{"info", "--json"}},
+			Parse:  firstOfJSONList("pkgs_dirs"),
+			Clean:  &Command{Name: "conda", Args: []string{"clean", "--all", "--yes"}},
+			Note:   "conda clean --all で、インデックスのキャッシュ、どの環境からも使われていないパッケージ、tarball、一時ファイル、ログを削除します。環境が使っているパッケージは残ります。",
+		},
+		// JavaScript
+		{
+			ID:     "npm",
+			Name:   "npm キャッシュ",
+			Locate: Command{Name: "npm", Args: []string{"config", "get", "cache"}},
+			Clean:  &Command{Name: "npm", Args: []string{"cache", "verify"}},
+			Note:   "npm cache verify で、キャッシュの整合性を確かめ、不要になったデータだけを削除します。空く容量は少ないことがあります。",
+		},
+		{
+			ID:     "pnpm",
+			Name:   "pnpm ストア",
+			Locate: Command{Name: "pnpm", Args: []string{"store", "path"}},
+			Clean:  &Command{Name: "pnpm", Args: []string{"store", "prune"}},
+			Note:   "pnpm store prune で、どのプロジェクトからも参照されていないパッケージを削除します。pnpm install の実行中は使わないでください。",
+			// pnpm keeps a store on every drive that holds a project
+			// (such as D:\.pnpm-store) and acts on the current drive's.
+			PerDrive:   true,
+			DriveStore: ".pnpm-store",
+		},
+		{
+			ID:     "yarn",
+			Name:   "Yarn キャッシュ",
+			Locate: Command{Name: "yarn", Args: []string{"cache", "dir"}},
+			Clean:  &Command{Name: "yarn", Args: []string{"cache", "clean"}},
+			Note:   "yarn cache clean で Yarn 1 のグローバルキャッシュをすべて削除します。次のインストールで再ダウンロードされます。Yarn 2 以降がプロジェクトごとに持つキャッシュは対象外です。",
+		},
+		{
+			ID:         "bun",
+			Name:       "Bun キャッシュ",
+			EnvDir:     "BUN_INSTALL_CACHE_DIR",
+			DefaultDir: `.bun\install\cache`,
+			Note:       "計測のみ。bun pm cache rm は package.json のあるフォルダでしか実行できないため、Skilli からは掃除しません。",
+		},
+		{
+			ID:     "deno",
+			Name:   "Deno キャッシュ",
+			Locate: Command{Name: "deno", Args: []string{"info"}},
+			Parse:  valueAfter("DENO_DIR location:"),
+			Clean:  &Command{Name: "deno", Args: []string{"clean"}},
+			Note:   "deno clean で Deno のグローバルなモジュールキャッシュ (DENO_DIR) をすべて削除します。次の実行で再ダウンロードされます。",
+		},
+		{
+			ID:          "playwright",
+			Name:        "Playwright のブラウザ",
+			EnvDir:      "PLAYWRIGHT_BROWSERS_PATH",
+			DefaultBase: "LOCALAPPDATA",
+			DefaultDir:  "ms-playwright",
+			Note:        "計測のみ。Playwright がテスト用にダウンロードしたブラウザです。",
+		},
+		// Go
+		{
+			ID:     "go-build",
+			Name:   "Go ビルドキャッシュ",
+			Locate: Command{Name: "go", Args: []string{"env", "GOCACHE"}},
+			Clean:  &Command{Name: "go", Args: []string{"clean", "-cache"}},
+			Note:   "go clean -cache でビルドキャッシュを削除します。次回のビルドとテストは時間がかかります。",
 		},
 		{
 			ID:     "go-mod",
@@ -101,6 +176,95 @@ func Targets() []Target {
 			Locate: Command{Name: "go", Args: []string{"env", "GOMODCACHE"}},
 			Clean:  &Command{Name: "go", Args: []string{"clean", "-modcache"}},
 			Note:   "注意: go clean -modcache は、使用中かどうかに関係なくモジュールキャッシュをすべて削除します。すべてのプロジェクトが次のビルドで依存を再ダウンロードし、オフラインではビルドできなくなります。",
+		},
+		// Rust
+		{
+			ID:         "cargo",
+			Name:       "Cargo のレジストリ",
+			EnvDir:     "CARGO_HOME",
+			DefaultDir: ".cargo",
+			SubDir:     "registry",
+			Note:       "計測のみ。Rust 1.88 以降の Cargo は、3 か月使われていないダウンロード済みのファイルを自動で削除します。プロジェクトごとのビルド結果 (target フォルダ) は、そのプロジェクトで cargo clean を実行して削除します。",
+		},
+		{
+			ID:         "cargo-git",
+			Name:       "Cargo の Git 依存",
+			EnvDir:     "CARGO_HOME",
+			DefaultDir: ".cargo",
+			SubDir:     "git",
+			Note:       "計測のみ。Git リポジトリから取得した依存です。Rust 1.88 以降の Cargo が、使われていないものを自動で削除します。",
+		},
+		{
+			ID:         "rustup",
+			Name:       "Rust のツールチェーン",
+			EnvDir:     "RUSTUP_HOME",
+			DefaultDir: ".rustup",
+			SubDir:     "toolchains",
+			Note:       "計測のみ。インストールした Rust のツールチェーンです。使わないものは rustup toolchain uninstall で削除します。",
+		},
+		// .NET
+		{
+			ID:     "nuget",
+			Name:   "NuGet のグローバルパッケージ",
+			Locate: Command{Name: "dotnet", Args: []string{"nuget", "locals", "global-packages", "--list", "--force-english-output"}},
+			Parse:  valueAfter("global-packages:"),
+			Clean:  &Command{Name: "dotnet", Args: []string{"nuget", "locals", "global-packages", "--clear"}},
+			Note:   "dotnet nuget locals global-packages --clear で、復元したパッケージをすべて削除します。次の dotnet restore で再ダウンロードされ、オフラインでは復元できなくなります。ビルド中は実行しないでください。",
+		},
+		{
+			ID:     "nuget-http",
+			Name:   "NuGet の HTTP キャッシュ",
+			Locate: Command{Name: "dotnet", Args: []string{"nuget", "locals", "http-cache", "--list", "--force-english-output"}},
+			Parse:  valueAfter("http-cache:"),
+			Clean:  &Command{Name: "dotnet", Args: []string{"nuget", "locals", "http-cache", "--clear"}},
+			Note:   "dotnet nuget locals http-cache --clear で、パッケージのダウンロード時に保存した HTTP のキャッシュを削除します。",
+		},
+		// Java
+		{
+			ID:         "gradle",
+			Name:       "Gradle キャッシュ",
+			EnvDir:     "GRADLE_USER_HOME",
+			DefaultDir: ".gradle",
+			SubDir:     "caches",
+			Note:       "計測のみ。Gradle は、7 日から 30 日使われていないキャッシュを自動で削除します。",
+		},
+		{
+			ID:         "maven",
+			Name:       "Maven のローカルリポジトリ",
+			DefaultDir: `.m2\repository`,
+			Note:       "計測のみ。全体を削除する公式のコマンドがないため、Skilli からは掃除しません。settings.xml で場所を変えている場合は、既定の場所だけを計測します。",
+		},
+		// PHP, Dart
+		{
+			ID:     "composer",
+			Name:   "Composer キャッシュ",
+			Locate: Command{Name: "composer", Args: []string{"config", "--global", "--absolute", "cache-dir"}},
+			Clean:  &Command{Name: "composer", Args: []string{"clear-cache"}},
+			Note:   "composer clear-cache で Composer のキャッシュをすべて削除します。次のインストールで再ダウンロードされます。",
+		},
+		{
+			ID:          "dart-pub",
+			Name:        "Dart / Flutter の pub キャッシュ",
+			EnvDir:      "PUB_CACHE",
+			DefaultBase: "LOCALAPPDATA",
+			DefaultDir:  `Pub\Cache`,
+			Clean:       &Command{Name: "dart", Args: []string{"pub", "cache", "clean", "--force"}},
+			Note:        "注意: dart pub cache clean は pub のキャッシュをすべて削除します。各プロジェクトで dart pub get か flutter pub get を実行し直すまで、ビルドできなくなります。",
+		},
+		// Other
+		{
+			ID:     "mise",
+			Name:   "mise キャッシュ",
+			Locate: Command{Name: "mise", Args: []string{"cache", "path"}},
+			Clean:  &Command{Name: "mise", Args: []string{"cache", "prune"}},
+			Note:   "mise cache prune で、最近使われていないキャッシュ (バージョンの一覧やリリースの情報など) だけを削除します。インストール済みのツールは削除しません。",
+		},
+		{
+			ID:         "huggingface",
+			Name:       "Hugging Face のキャッシュ",
+			EnvDir:     "HF_HOME",
+			DefaultDir: `.cache\huggingface`,
+			Note:       "計測のみ。ダウンロードしたモデルやデータセットが入っています。不要なものは Hugging Face の CLI で削除します。",
 		},
 		{
 			ID:          "temp",
@@ -112,12 +276,92 @@ func Targets() []Target {
 	}
 }
 
-// FindTarget returns the built-in target with the given ID.
+// TargetsFor returns Targets plus, for each per-drive target, a copy for
+// every drive in roots (such as `D:\`) other than the drive of home. The
+// copy's ID ends in the drive letter, as pnpm-d.
+//
+//	targets := cleanup.TargetsFor([]string{`C:\`, `D:\`}, `C:\Users\me`)
+func TargetsFor(roots []string, home string) []Target {
+	homeVolume := filepath.VolumeName(home)
+	var targets []Target
+	for _, t := range Targets() {
+		targets = append(targets, t)
+		if !t.PerDrive {
+			continue
+		}
+		for _, root := range roots {
+			if volume := filepath.VolumeName(root); volume != "" && !strings.EqualFold(volume, homeVolume) {
+				targets = append(targets, t.onDrive(volume))
+			}
+		}
+	}
+	return targets
+}
+
+// IsDriveCopy reports whether t is the copy of a per-drive target made by
+// TargetsFor, which lists show only when the drive has the cache.
+func (t Target) IsDriveCopy() bool { return t.WorkDir != "" }
+
+func (t Target) onDrive(volume string) Target {
+	letter := strings.ToLower(strings.TrimSuffix(volume, ":"))
+	t.ID += "-" + letter
+	t.Name += " (" + strings.ToUpper(volume) + ")"
+	t.WorkDir = strings.ToUpper(volume) + `\`
+	t.RequireDir = t.WorkDir + t.DriveStore
+	t.PerDrive = false
+	return t
+}
+
+// FindTarget returns the built-in target with the given ID, including the
+// copy of a per-drive target for a drive letter, as pnpm-d.
 func FindTarget(id string) (Target, bool) {
 	targets := Targets()
-	i := slices.IndexFunc(targets, func(t Target) bool { return t.ID == id })
+	if i := slices.IndexFunc(targets, func(t Target) bool { return t.ID == id }); i >= 0 {
+		return targets[i], true
+	}
+	base, letter, ok := strings.CutLast(id, "-")
+	if !ok || len(letter) != 1 || letter[0] < 'a' || letter[0] > 'z' {
+		return Target{}, false
+	}
+	i := slices.IndexFunc(targets, func(t Target) bool { return t.ID == base && t.PerDrive })
 	if i < 0 {
 		return Target{}, false
 	}
-	return targets[i], true
+	return targets[i].onDrive(letter + ":"), true
+}
+
+// valueAfter finds the line that starts with label, as in
+// "global-packages: C:\Users\me\.nuget\packages\", and returns the rest of
+// it without surrounding quotes. Other lines, such as a first-run banner,
+// are ignored.
+func valueAfter(label string) func(string) (string, error) {
+	return func(output string) (string, error) {
+		for line := range strings.Lines(output) {
+			if rest, ok := strings.CutPrefix(strings.TrimSpace(line), label); ok {
+				return strings.Trim(strings.TrimSpace(rest), `"`), nil
+			}
+		}
+		return "", fmt.Errorf("no line starting with %q", label)
+	}
+}
+
+// firstOfJSONList reads a JSON object and returns the first string in the
+// list under key, such as the first of conda's pkgs_dirs, which is where
+// conda puts new packages.
+func firstOfJSONList(key string) func(string) (string, error) {
+	return func(output string) (string, error) {
+		var fields map[string]any
+		if err := json.Unmarshal([]byte(output), &fields); err != nil {
+			return "", err
+		}
+		list, _ := fields[key].([]any)
+		if len(list) == 0 {
+			return "", fmt.Errorf("no %s in the output", key)
+		}
+		first, ok := list[0].(string)
+		if !ok {
+			return "", fmt.Errorf("%s[0] is not a string", key)
+		}
+		return first, nil
+	}
 }
