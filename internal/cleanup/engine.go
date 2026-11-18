@@ -119,12 +119,13 @@ type Scan struct {
 	Location          // flattened into the JSON
 	Size     *Size    `json:"size,omitempty"`
 	Clean    []string `json:"clean_command,omitempty"`
+	Settings string   `json:"settings_uri,omitempty"`
 }
 
 // Scan locates and measures t. The measurement stops when ctx ends and is
 // then marked partial.
 func (e *Engine) Scan(ctx context.Context, t Target) Scan {
-	result := Scan{ID: t.ID, Name: t.Name, Location: e.Locate(ctx, t)}
+	result := Scan{ID: t.ID, Name: t.Name, Location: e.Locate(ctx, t), Settings: t.SettingsURI}
 	if t.Clean != nil {
 		result.Clean = append([]string{t.Clean.Name}, t.Clean.Args...)
 	}

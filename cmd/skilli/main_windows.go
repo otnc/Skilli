@@ -88,6 +88,7 @@ type cli struct {
 	readDrives  func() (storage.Snapshot, error)
 	newEngine   func() (*cleanup.Engine, error)
 	openUpdater func() error
+	openURI     func(uri string) error
 }
 
 func newCLI() *cli {
@@ -99,7 +100,20 @@ func newCLI() *cli {
 		readDrives:  storage.Read,
 		newEngine:   cleanup.New,
 		openUpdater: openUpdater,
+		openURI:     openURI,
 	}
+}
+
+func openURI(uri string) error {
+	verb, err := windows.UTF16PtrFromString("open")
+	if err != nil {
+		return err
+	}
+	target, err := windows.UTF16PtrFromString(uri)
+	if err != nil {
+		return err
+	}
+	return windows.ShellExecute(0, verb, target, nil, nil, windows.SW_SHOWNORMAL)
 }
 
 func isConsole(file *os.File) bool {
@@ -114,6 +128,7 @@ const helpText = `Skilli（スキリ）
   skilli status [--json]       固定ドライブの空き容量を確認する
   skilli scan [ID...] [--json] キャッシュの場所とサイズを計測する
   skilli clean <ID>            確認のうえ、ツール公式のコマンドでキャッシュを掃除する
+                               (temp は Windows の設定を開く)
   skilli history [--days N] [--json]
                                掃除の履歴を表示する
   skilli update                更新を確認する画面を開く
@@ -335,6 +350,14 @@ func (c *cli) clean(ctx context.Context, args []string) int {
 		return exitUsage
 	}
 	target := targets[0]
+	if target.SettingsURI != "" {
+		fmt.Fprintf(c.stdout, "%s\nWindows の設定を開きます。\n", target.Note)
+		if err := c.openURI(target.SettingsURI); err != nil {
+			fmt.Fprintf(c.stderr, "Windows の設定を開けませんでした: %v\n", err)
+			return exitError
+		}
+		return exitOK
+	}
 	if !target.Cleanable() {
 		fmt.Fprintf(c.stderr, "%s は計測のみの対象で、Skilli からは掃除できません。\n%s\n", target.Name, target.Note)
 		return exitUsage

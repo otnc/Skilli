@@ -20,6 +20,7 @@ type testCLI struct {
 	*cli
 	stdout, stderr *bytes.Buffer
 	runner         *fakeRunner
+	openedURIs     []string
 }
 
 type fakeRunner struct {
@@ -69,6 +70,10 @@ func newTestCLI(t *testing.T, stdin string, interactive bool) *testCLI {
 			}, nil
 		},
 		openUpdater: func() error { return nil },
+		openURI: func(uri string) error {
+			tc.openedURIs = append(tc.openedURIs, uri)
+			return nil
+		},
 	}
 	return tc
 }
@@ -179,9 +184,12 @@ func TestCleanRunsOnlyAfterYes(t *testing.T) {
 	}
 }
 
-func TestCleanRefusesMeasureOnlyTarget(t *testing.T) {
+func TestCleanTempOpensWindowsSettingsInsteadOfDeleting(t *testing.T) {
 	tc := newTestCLI(t, "y\n", true)
-	if code := tc.run(t.Context(), []string{"clean", "temp"}); code != exitUsage || tc.runner.runs != 0 {
+	if code := tc.run(t.Context(), []string{"clean", "temp"}); code != exitOK || tc.runner.runs != 0 {
 		t.Fatalf("exit = %d, runs = %d", code, tc.runner.runs)
+	}
+	if len(tc.openedURIs) != 1 || tc.openedURIs[0] != "ms-settings:storagesense" {
+		t.Fatalf("opened = %q", tc.openedURIs)
 	}
 }

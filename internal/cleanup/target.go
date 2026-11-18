@@ -23,8 +23,11 @@ type Target struct {
 	// EnvDir names an environment variable that holds the folder.
 	EnvDir string
 	// Clean is the tool's own cleanup command, or nil for a target that
-	// is only measured.
+	// Skilli does not clean itself.
 	Clean *Command
+	// SettingsURI is an ms-settings: page where Windows cleans the target,
+	// for a folder that no single tool owns.
+	SettingsURI string
 	// Note tells the user what the cleanup removes and what it costs.
 	Note string
 }
@@ -35,8 +38,9 @@ func (t Target) Cleanable() bool { return t.Clean != nil }
 // Targets returns the built-in targets in display order.
 //
 // A cleanup command is added only when the tool documents it as removing
-// cache data that it can download or rebuild again; everything else stays
-// measure-only so that the user can open the folder and decide.
+// cache data that it can download or rebuild again. A folder shared by many
+// apps, such as %TEMP%, is left to Windows' own cleanup, which skips files
+// in use.
 func Targets() []Target {
 	return []Target{
 		{
@@ -61,22 +65,25 @@ func Targets() []Target {
 			Note:   "pnpm store prune で、どのプロジェクトからも参照されていないパッケージを削除します。pnpm install の実行中は使わないでください。",
 		},
 		{
-			ID:     "go-mod",
-			Name:   "Go モジュールキャッシュ",
-			Locate: Command{Name: "go", Args: []string{"env", "GOMODCACHE"}},
-			Note:   "計測のみ。削除するとオフラインでビルドできなくなるため、Skilli からは掃除しません。",
-		},
-		{
 			ID:     "npm",
 			Name:   "npm キャッシュ",
 			Locate: Command{Name: "npm", Args: []string{"config", "get", "cache"}},
-			Note:   "計測のみ。npm のキャッシュは npm 自身が整合性を管理します。",
+			Clean:  &Command{Name: "npm", Args: []string{"cache", "verify"}},
+			Note:   "npm cache verify で、キャッシュの整合性を確かめ、不要になったデータだけを削除します。空く容量は少ないことがあります。",
 		},
 		{
-			ID:     "temp",
-			Name:   "ユーザーの一時フォルダ",
-			EnvDir: "TEMP",
-			Note:   "計測のみ。使用中のアプリのファイルが含まれるため、中身を確認してから手動で削除してください。",
+			ID:     "go-mod",
+			Name:   "Go モジュールキャッシュ",
+			Locate: Command{Name: "go", Args: []string{"env", "GOMODCACHE"}},
+			Clean:  &Command{Name: "go", Args: []string{"clean", "-modcache"}},
+			Note:   "注意: go clean -modcache は、使用中かどうかに関係なくモジュールキャッシュをすべて削除します。すべてのプロジェクトが次のビルドで依存を再ダウンロードし、オフラインではビルドできなくなります。",
+		},
+		{
+			ID:          "temp",
+			Name:        "ユーザーの一時フォルダ",
+			EnvDir:      "TEMP",
+			SettingsURI: "ms-settings:storagesense",
+			Note:        "使用中のアプリのファイルが含まれるため、Skilli は削除しません。Windows の「設定 > システム > ストレージ > 一時ファイル」で、使用中のファイルを避けて削除できます。",
 		},
 	}
 }

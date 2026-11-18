@@ -90,8 +90,12 @@ func (d *dashboard) renderCaches(c *ui.Context) {
 					_ = mygo.Shell.OpenPath(scan.Dir)
 				}
 				target, _ := cleanup.FindTarget(scan.ID)
+				if target.SettingsURI != "" {
+					if ui.Button(c, "Windows の設定で削除…").Tooltip(target.Note).Clicked() {
+						_ = mygo.Shell.OpenExternal(target.SettingsURI)
+					}
+				}
 				if !target.Cleanable() {
-					ui.Text(c, "計測のみ").Tooltip(target.Note)
 					return
 				}
 				label := "掃除…"

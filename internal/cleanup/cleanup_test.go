@@ -175,7 +175,7 @@ func TestNewPlanRefusesProtectedFolders(t *testing.T) {
 
 func TestNewPlanRefusesMeasureOnlyTarget(t *testing.T) {
 	f := newFixture(t)
-	target, _ := FindTarget("go-mod")
+	target, _ := FindTarget("temp")
 	if _, err := f.engine.NewPlan(t.Context(), target); !errors.Is(err, ErrNotCleanable) {
 		t.Fatalf("NewPlan: %v", err)
 	}
