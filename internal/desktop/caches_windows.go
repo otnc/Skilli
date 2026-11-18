@@ -66,9 +66,13 @@ func (d *dashboard) renderCaches(c *ui.Context) {
 	if d.caches.scanning {
 		label = "計測中…"
 	}
-	if ui.Button(c, label).Disabled(d.busy()).Clicked() {
-		d.scanCaches()
-	}
+	// A Column stretches its children to full width; a Row keeps the
+	// button at its own width like the buttons at the top.
+	ui.Row(c).Children(func() {
+		if ui.Button(c, label).Disabled(d.busy()).Clicked() {
+			d.scanCaches()
+		}
+	})
 	for _, scan := range d.caches.scans {
 		ui.Column(c).Gap(4).Children(func() {
 			ui.Text(c, scan.Name).Bold()
