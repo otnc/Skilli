@@ -20,6 +20,9 @@ type Target struct {
 	Name string
 	// Locate prints the folder on stdout. Ignored when EnvDir is set.
 	Locate Command
+	// MissingIfLocateFails treats a failing Locate as the tool being absent,
+	// for commands such as python -m pip that fail when pip is not installed.
+	MissingIfLocateFails bool
 	// EnvDir names an environment variable that holds the folder.
 	EnvDir string
 	// Clean is the tool's own cleanup command, or nil for a target that
@@ -70,6 +73,27 @@ func Targets() []Target {
 			Locate: Command{Name: "npm", Args: []string{"config", "get", "cache"}},
 			Clean:  &Command{Name: "npm", Args: []string{"cache", "verify"}},
 			Note:   "npm cache verify で、キャッシュの整合性を確かめ、不要になったデータだけを削除します。空く容量は少ないことがあります。",
+		},
+		{
+			ID:                   "pip",
+			Name:                 "pip キャッシュ",
+			Locate:               Command{Name: "python", Args: []string{"-m", "pip", "cache", "dir"}},
+			MissingIfLocateFails: true,
+			Clean:                &Command{Name: "python", Args: []string{"-m", "pip", "cache", "purge"}},
+			Note:                 "pip cache purge で、PATH の python が使う pip のキャッシュをすべて削除します。必要になれば再ダウンロードされます。",
+		},
+		{
+			ID:     "poetry",
+			Name:   "Poetry キャッシュ",
+			Locate: Command{Name: "poetry", Args: []string{"config", "cache-dir"}},
+			Note:   "計測のみ。Poetry は既定でこのフォルダの中にプロジェクトの仮想環境 (virtualenvs) を作るため、Skilli からは掃除しません。",
+		},
+		{
+			ID:     "mise",
+			Name:   "mise キャッシュ",
+			Locate: Command{Name: "mise", Args: []string{"cache", "path"}},
+			Clean:  &Command{Name: "mise", Args: []string{"cache", "prune"}},
+			Note:   "mise cache prune で、最近使われていないキャッシュ (バージョンの一覧やリリースの情報など) だけを削除します。インストール済みのツールは削除しません。",
 		},
 		{
 			ID:     "go-mod",

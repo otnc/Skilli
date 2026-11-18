@@ -45,7 +45,9 @@ type Runner interface {
 	// LookPath resolves a command name to an absolute executable path. It
 	// must not resolve to the current directory.
 	LookPath(name string) (string, error)
-	// Output runs exe and returns its standard output.
+	// Output runs exe and returns its standard output. Like Run, it runs
+	// in a fixed directory, not the caller's, so that a project's own
+	// settings cannot change the result.
 	Output(ctx context.Context, exe string, args []string) (string, error)
 	// Run runs exe and returns its combined output for error messages.
 	Run(ctx context.Context, exe string, args []string) (string, error)
@@ -92,6 +94,10 @@ func (e *Engine) Locate(ctx context.Context, t Target) Location {
 		ctx, cancel := context.WithTimeout(ctx, LocateTimeout)
 		defer cancel()
 		out, err := e.Runner.Output(ctx, exe, t.Locate.Args)
+		if err != nil && t.MissingIfLocateFails && ctx.Err() == nil {
+			loc.Status = Missing
+			return loc
+		}
 		if err != nil {
 			loc.Status, loc.Error = Failed, err.Error()
 			return loc

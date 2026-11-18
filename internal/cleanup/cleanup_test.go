@@ -13,9 +13,10 @@ import (
 
 // fakeRunner resolves every command to exe and answers Output with dir.
 type fakeRunner struct {
-	exe  string
-	dir  string
-	runs [][]string
+	exe       string
+	dir       string
+	outputErr error
+	runs      [][]string
 	// onRun lets a test change the world while the cleanup command runs.
 	onRun func()
 }
@@ -23,6 +24,9 @@ type fakeRunner struct {
 func (f *fakeRunner) LookPath(string) (string, error) { return f.exe, nil }
 
 func (f *fakeRunner) Output(context.Context, string, []string) (string, error) {
+	if f.outputErr != nil {
+		return "", f.outputErr
+	}
 	return f.dir + "\r\n", nil
 }
 
@@ -245,6 +249,32 @@ func TestScanJSONFlattensLocation(t *testing.T) {
 	for _, want := range []string{`"id":"uv"`, `"status":"found"`, `"bytes":100`, `"clean_command":["uv","cache","prune"]`} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("%s lacks %s", data, want)
+		}
+	}
+}
+
+func TestLocateFailureMeansMissingOnlyWhereDeclared(t *testing.T) {
+	f := newFixture(t)
+	f.runner.outputErr = errors.New("exit status 1: No module named pip")
+	pip, _ := FindTarget("pip")
+	if loc := f.engine.Locate(t.Context(), pip); loc.Status != Missing {
+		t.Fatalf("pip without pip must be missing, got %+v", loc)
+	}
+	if loc := f.engine.Locate(t.Context(), uvTarget(t)); loc.Status != Failed {
+		t.Fatalf("a failing uv must be an error, got %+v", loc)
+	}
+}
+
+func TestIsAppExecutionAlias(t *testing.T) {
+	local := `C:\Users\me\AppData\Local`
+	for exe, want := range map[string]bool{
+		`C:\Users\me\AppData\Local\Microsoft\WindowsApps\python.exe`: true,
+		`c:\users\me\appdata\local\microsoft\windowsapps\python.exe`: true,
+		`C:\Users\me\.local\bin\python.exe`:                          false,
+		`C:\Program Files\Go\bin\go.exe`:                             false,
+	} {
+		if got := IsAppExecutionAlias(exe, local); got != want {
+			t.Errorf("IsAppExecutionAlias(%q) = %v; want %v", exe, got, want)
 		}
 	}
 }
