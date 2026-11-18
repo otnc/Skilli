@@ -76,3 +76,40 @@ func TestSaveRejectsInvalidConfig(t *testing.T) {
 		t.Fatalf("invalid config must not be written: %v", err)
 	}
 }
+
+func TestCustomTargetsRoundTripAndValidate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := Default()
+	cfg.CustomTargets = []CustomTarget{
+		{ID: "my-1", Name: "tool cache", Dir: `C:\tool\cache`, Command: []string{"tool", "clean"}, Method: MethodCommandThenDelete},
+		{ID: "my-2", Name: "other", Dir: `D:\other`, Method: MethodDelete},
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil || len(got.CustomTargets) != 2 || got.CustomTargets[0].Command[1] != "clean" {
+		t.Fatalf("got %+v, %v", got.CustomTargets, err)
+	}
+	if id := got.NextCustomID(); id != "my-3" {
+		t.Fatalf("NextCustomID = %s", id)
+	}
+
+	for name, bad := range map[string]CustomTarget{
+		"relative folder":        {ID: "my-1", Name: "x", Dir: `cache`, Method: MethodDelete},
+		"no name":                {ID: "my-1", Dir: `C:\x`, Method: MethodDelete},
+		"command method, no cmd": {ID: "my-1", Name: "x", Dir: `C:\x`, Method: MethodCommand},
+		"unknown method":         {ID: "my-1", Name: "x", Dir: `C:\x`, Method: "delete-then-command"},
+	} {
+		c := Default()
+		c.CustomTargets = []CustomTarget{bad}
+		if c.Validate() == nil {
+			t.Errorf("%s must be invalid", name)
+		}
+	}
+	dup := Default()
+	dup.CustomTargets = []CustomTarget{cfg.CustomTargets[1], cfg.CustomTargets[1]}
+	if dup.Validate() == nil {
+		t.Error("duplicate IDs must be invalid")
+	}
+}

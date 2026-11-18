@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/otnc/Skilli/internal/cleanup"
+	"github.com/otnc/Skilli/internal/config"
 	"github.com/otnc/Skilli/internal/desktop"
 	"github.com/otnc/Skilli/internal/storage"
 )
@@ -87,32 +88,37 @@ type cli struct {
 	readDrives  func() (storage.Snapshot, error)
 	newEngine   func() (*cleanup.Engine, error)
 	openUpdater func() error
-	openURI     func(uri string) error
+	// customTargets returns the targets the user added in the settings.
+	customTargets func() ([]cleanup.Target, error)
 }
 
 func newCLI() *cli {
 	return &cli{
-		stdin:       os.Stdin,
-		stdout:      os.Stdout,
-		stderr:      os.Stderr,
-		interactive: isConsole(os.Stdin),
-		readDrives:  storage.Read,
-		newEngine:   cleanup.New,
-		openUpdater: openUpdater,
-		openURI:     openURI,
+		stdin:         os.Stdin,
+		stdout:        os.Stdout,
+		stderr:        os.Stderr,
+		interactive:   isConsole(os.Stdin),
+		readDrives:    storage.Read,
+		newEngine:     cleanup.New,
+		openUpdater:   openUpdater,
+		customTargets: loadCustomTargets,
 	}
 }
 
-func openURI(uri string) error {
-	verb, err := windows.UTF16PtrFromString("open")
+func loadCustomTargets() ([]cleanup.Target, error) {
+	path, err := config.Path()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	target, err := windows.UTF16PtrFromString(uri)
+	cfg, err := config.Load(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return windows.ShellExecute(0, verb, target, nil, nil, windows.SW_SHOWNORMAL)
+	var targets []cleanup.Target
+	for _, custom := range cfg.CustomTargets {
+		targets = append(targets, cleanup.FromCustom(custom))
+	}
+	return targets, nil
 }
 
 func isConsole(file *os.File) bool {
@@ -127,7 +133,6 @@ const helpText = `Skilli（スキリ）
   skilli status [--json]       固定ドライブの空き容量を確認する
   skilli scan [ID...] [--json] キャッシュの場所とサイズを計測する
   skilli clean <ID>            確認のうえ、公式コマンドか直接削除でキャッシュを掃除する
-                               (temp は Windows の設定を開く)
   skilli history [--days N] [--json]
                                掃除の履歴を表示する
   skilli update                更新を確認する画面を開く
@@ -317,7 +322,7 @@ func describeScan(result cleanup.Scan) string {
 	case cleanup.Failed:
 		return "計測できませんでした: " + result.Error
 	}
-	text := storage.Size(result.Size.Bytes) + "  " + result.Dir
+	text := result.Size.String() + "  " + result.Dir
 	if result.Size.Partial {
 		text += "  (一部のみ計測)"
 	}
@@ -325,6 +330,10 @@ func describeScan(result cleanup.Scan) string {
 }
 
 func (c *cli) selectTargets(ids []string) ([]cleanup.Target, bool) {
+	custom, err := c.customTargets()
+	if err != nil {
+		fmt.Fprintf(c.stderr, "自分で追加した対象を読み込めませんでした: %v\n", err)
+	}
 	if len(ids) == 0 {
 		var roots []string
 		if snapshot, err := c.readDrives(); err == nil {
@@ -333,11 +342,11 @@ func (c *cli) selectTargets(ids []string) ([]cleanup.Target, bool) {
 			}
 		}
 		home, _ := os.UserHomeDir()
-		return cleanup.TargetsFor(roots, home), true
+		return append(cleanup.TargetsFor(roots, home), custom...), true
 	}
 	var targets []cleanup.Target
 	for _, id := range ids {
-		target, ok := cleanup.FindTarget(id)
+		target, ok := cleanup.Find(custom, id)
 		if !ok {
 			fmt.Fprintf(c.stderr, "ID %q のターゲットはありません。skilli scan で一覧を確認してください。\n", id)
 			return nil, false
@@ -362,14 +371,6 @@ func (c *cli) clean(ctx context.Context, args []string) int {
 		return exitUsage
 	}
 	target := targets[0]
-	if target.SettingsURI != "" {
-		fmt.Fprintf(c.stdout, "%s\nWindows の設定を開きます。\n", target.Note)
-		if err := c.openURI(target.SettingsURI); err != nil {
-			fmt.Fprintf(c.stderr, "Windows の設定を開けませんでした: %v\n", err)
-			return exitError
-		}
-		return exitOK
-	}
 	if !target.Cleanable() {
 		fmt.Fprintf(c.stderr, "%s は計測のみの対象で、Skilli からは掃除できません。\n%s\n", target.Name, target.Note)
 		return exitUsage
@@ -387,7 +388,7 @@ func (c *cli) clean(ctx context.Context, args []string) int {
 		return exitError
 	}
 
-	fmt.Fprintf(c.stdout, "対象      %s\nフォルダ  %s\n現在      %s", target.Name, plan.Dir, storage.Size(plan.Size.Bytes))
+	fmt.Fprintf(c.stdout, "対象      %s\nフォルダ  %s\n削除対象  %s", target.Name, plan.Dir, plan.Size.String())
 	if plan.Size.Partial {
 		fmt.Fprint(c.stdout, " 以上 (一部のみ計測)")
 	}
@@ -395,7 +396,11 @@ func (c *cli) clean(ctx context.Context, args []string) int {
 	if plan.Deletes() {
 		label = "削除"
 	}
-	fmt.Fprintf(c.stdout, "\n%s      %s\n\n%s\n削除したファイルはごみ箱に入らず、元に戻せません。\n", label, plan.Command(), target.Note)
+	fmt.Fprintf(c.stdout, "\n%s      %s\n", label, plan.Command())
+	if plan.Fallback != "" {
+		fmt.Fprintf(c.stdout, "          (優先する方法が使えないため切り替えました: %s)\n", plan.Fallback)
+	}
+	fmt.Fprintf(c.stdout, "\n%s\n削除したファイルはごみ箱に入らず、元に戻せません。\n", target.Note)
 
 	if !c.interactive {
 		fmt.Fprintln(c.stderr, "掃除には確認が必要です。対話できるターミナルから実行してください。")
@@ -414,6 +419,9 @@ func (c *cli) clean(ctx context.Context, args []string) int {
 		return exitError
 	}
 	fmt.Fprintf(c.stdout, "完了しました。%s → %s\n", storage.Size(result.SizeBefore.Bytes), storage.Size(result.SizeAfter.Bytes))
+	if result.Kept > 0 {
+		fmt.Fprintf(c.stdout, "条件に合わない %d 件 (新しいファイルなど) は残しました。\n", result.Kept)
+	}
 	if result.Skipped > 0 {
 		fmt.Fprintf(c.stdout, "使用中などで削除できなかった %d 件と、リンクはそのまま残しました。\n", result.Skipped)
 	}

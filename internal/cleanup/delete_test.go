@@ -33,7 +33,8 @@ func TestRemoveContentsKeepsRootAndLinkedTargets(t *testing.T) {
 	write(t, keep, 10)
 	linked := os.Symlink(outside, filepath.Join(root, "link")) == nil
 
-	skipped, err := RemoveContents(t.Context(), root)
+	stats, err := RemoveContents(t.Context(), root, RemoveOptions{})
+	skipped := stats.Skipped
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,7 @@ func TestRemoveContentsRefusesALinkAsRoot(t *testing.T) {
 	if err := os.Symlink(outside, link); err != nil {
 		t.Skipf("symbolic links are unavailable: %v", err)
 	}
-	if _, err := RemoveContents(t.Context(), link); !errors.Is(err, ErrUnsafeFolder) {
+	if _, err := RemoveContents(t.Context(), link, RemoveOptions{}); !errors.Is(err, ErrUnsafeFolder) {
 		t.Fatalf("RemoveContents(link) = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(outside, "keep.bin")); err != nil {

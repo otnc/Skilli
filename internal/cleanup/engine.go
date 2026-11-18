@@ -38,6 +38,8 @@ var (
 	ErrPlanChanged = errors.New("tool or folder changed since the plan")
 	// ErrNotCleanable reports a measure-only target.
 	ErrNotCleanable = errors.New("target has no cleanup command")
+	// ErrToolMissing reports that the cleanup command is not installed.
+	ErrToolMissing = errors.New("cleanup tool was not found")
 	// ErrInUse reports that a program using the cache is running.
 	ErrInUse = errors.New("a program that uses the cache is running")
 	// ErrWrongVersion reports a tool whose version would clean another cache.
@@ -71,7 +73,10 @@ type Engine struct {
 	Home    func() (string, error)
 	// Running returns which of the named executables are running.
 	Running func(names []string) ([]string, error)
-	Now     func() time.Time
+	// PathEntries lists the folders PATH names, which a deletion with
+	// KeepPathEntries leaves in place.
+	PathEntries func() []string
+	Now         func() time.Time
 
 	mu      sync.Mutex
 	applied map[string]bool
@@ -95,14 +100,17 @@ func (e *Engine) Locate(ctx context.Context, t Target) Location {
 			return loc
 		}
 	}
-	if !t.locatedByCommand() {
+	switch {
+	case t.Dir != "":
+		loc.Dir = t.Dir
+	case !t.locatedByCommand():
 		dir, err := e.folderFromEnvironment(t)
 		if err != nil {
 			loc.Status, loc.Error = Failed, err.Error()
 			return loc
 		}
 		loc.Dir = dir
-	} else {
+	default:
 		exe, err := e.lookPath(t, t.Locate.Name)
 		if err != nil {
 			loc.Status = Missing
@@ -141,6 +149,7 @@ func (e *Engine) Locate(ctx context.Context, t Target) Location {
 		loc.Status = Missing
 		return loc
 	}
+	loc.Dir = longPath(loc.Dir)
 	loc.Status = Found
 	return loc
 }
@@ -174,14 +183,14 @@ type Scan struct {
 	Location          // flattened into the JSON
 	Size     *Size    `json:"size,omitempty"`
 	Clean    []string `json:"clean_command,omitempty"`
-	Settings string   `json:"settings_uri,omitempty"`
-	Deletes  bool     `json:"deletes,omitzero"`
+	// Methods lists how the target is cleaned, in the order tried.
+	Methods []string `json:"methods,omitempty"`
 }
 
 // Scan locates and measures t. The measurement stops when ctx ends and is
 // then marked partial.
 func (e *Engine) Scan(ctx context.Context, t Target) Scan {
-	result := Scan{ID: t.ID, Name: t.Name, Location: e.Locate(ctx, t), Settings: t.SettingsURI, Deletes: t.Delete != nil}
+	result := Scan{ID: t.ID, Name: t.Name, Location: e.Locate(ctx, t), Methods: t.methods()}
 	if t.Clean != nil {
 		result.Clean = append([]string{t.Clean.Name}, t.Clean.Args...)
 	}
@@ -203,19 +212,24 @@ type Plan struct {
 	ID     string
 	Target Target
 	Dir    string
+	// Method is MethodCommand or MethodDelete.
+	Method string
 	// Executable is the cleanup command's executable; empty for a deletion.
 	Executable string
 	exeInfo    os.FileInfo
 	// Scope lists the folders whose contents a deletion removes.
 	Scope     []string
+	options   RemoveOptions
 	dirInfo   os.FileInfo
 	Size      Size
 	CreatedAt time.Time
 	ExpiresAt time.Time
+	// Fallback explains why the target's preferred method was not used.
+	Fallback string
 }
 
 // Deletes reports whether the plan has Skilli remove files itself.
-func (p *Plan) Deletes() bool { return p.Target.Delete != nil }
+func (p *Plan) Deletes() bool { return p.Method == MethodDelete }
 
 // Command describes what the plan runs or deletes, for display.
 func (p *Plan) Command() string {
@@ -243,41 +257,60 @@ func (e *Engine) NewPlan(ctx context.Context, t Target) (*Plan, error) {
 	if err := e.checkFolder(scan.Dir); err != nil {
 		return nil, err
 	}
-	now := e.Now()
-	plan := &Plan{
-		ID:        uuid.New().String(),
-		Target:    t,
-		Dir:       scan.Dir,
-		Size:      *scan.Size,
-		CreatedAt: now,
-		ExpiresAt: now.Add(PlanLifetime),
-	}
 	if err := e.checkBusy(t); err != nil {
 		return nil, err
 	}
-	if t.Delete != nil {
-		if err := e.planDeletion(ctx, plan); err != nil {
+	methods := t.methods()
+	var fallback string
+	for i, method := range methods {
+		now := e.Now()
+		plan := &Plan{
+			ID:        uuid.New().String(),
+			Target:    t,
+			Dir:       scan.Dir,
+			Method:    method,
+			Size:      *scan.Size,
+			CreatedAt: now,
+			ExpiresAt: now.Add(PlanLifetime),
+			Fallback:  fallback,
+		}
+		var err error
+		if method == MethodDelete {
+			err = e.planDeletion(ctx, plan)
+		} else {
+			err = e.planCommand(ctx, plan, scan.Executable)
+		}
+		if err == nil {
+			return plan, nil
+		}
+		// Only a method that cannot be used gives way to the next one;
+		// an unsafe folder or a busy tool refuses the cleanup altogether.
+		if i == len(methods)-1 || !(errors.Is(err, ErrWrongVersion) || errors.Is(err, ErrToolMissing)) {
 			return nil, err
 		}
-		return plan, nil
+		fallback = err.Error()
 	}
+	return nil, ErrNotCleanable
+}
 
-	exe := scan.Executable
-	if !t.locatedByCommand() {
+func (e *Engine) planCommand(ctx context.Context, plan *Plan, located string) error {
+	t := plan.Target
+	exe := located
+	if !t.locatedByCommand() || t.Locate.Name != t.Clean.Name {
 		var err error
 		if exe, err = e.lookPath(t, t.Clean.Name); err != nil {
-			return nil, fmt.Errorf("%s was not found: %w", t.Clean.Name, err)
+			return fmt.Errorf("%w: %s: %w", ErrToolMissing, t.Clean.Name, err)
 		}
 	}
 	info, err := os.Stat(exe)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if err := e.checkVersion(ctx, t, exe); err != nil {
-		return nil, err
+		return err
 	}
 	plan.Executable, plan.exeInfo = exe, pinIdentity(info)
-	return plan, nil
+	return nil
 }
 
 func (e *Engine) planDeletion(ctx context.Context, p *Plan) error {
@@ -287,8 +320,10 @@ func (e *Engine) planDeletion(ctx context.Context, p *Plan) error {
 	}
 	p.dirInfo = pinIdentity(info)
 	p.Scope = deletionScope(p.Dir, p.Target.Delete)
-	// The plan shows only what would be deleted, which for Hugging Face
-	// is less than the measured folder.
+	p.options = e.removeOptions(p.Target.Delete)
+	// The plan shows only what would be deleted, which can be much less
+	// than the measured folder: Hugging Face's token, recent files in the
+	// temporary folder and fnm's links in PATH stay.
 	p.Size = Size{}
 	for _, dir := range p.Scope {
 		if err := CheckOnDisk(dir); errors.Is(err, os.ErrNotExist) {
@@ -296,15 +331,24 @@ func (e *Engine) planDeletion(ctx context.Context, p *Plan) error {
 		} else if err != nil {
 			return err
 		}
-		size, err := Measure(ctx, dir)
+		size, err := MeasureSelected(ctx, dir, p.options)
 		if err != nil {
 			return err
 		}
-		p.Size.Bytes += size.Bytes
-		p.Size.Files += size.Files
-		p.Size.Partial = p.Size.Partial || size.Partial
+		p.Size.add(size)
 	}
 	return nil
+}
+
+func (e *Engine) removeOptions(d *Deletion) RemoveOptions {
+	opts := RemoveOptions{KeepProtected: d.KeepProtected, LinksOnly: d.LinksOnly}
+	if d.OlderThan > 0 {
+		opts.Before = e.Now().Add(-d.OlderThan)
+	}
+	if d.KeepPathEntries && e.PathEntries != nil {
+		opts.Keep = e.PathEntries()
+	}
+	return opts
 }
 
 func deletionScope(dir string, d *Deletion) []string {
@@ -325,9 +369,12 @@ type Result struct {
 	FreeBefore uint64
 	FreeAfter  uint64
 	Output     string
-	// Skipped counts what a deletion left in place: files in use or
-	// protected, and links, which it never follows or removes.
+	// Skipped counts what a deletion could not remove, mostly files in
+	// use, and the links it never follows.
 	Skipped int
+	// Kept counts what the deletion's rules left on purpose, such as
+	// recent files in the temporary folder.
+	Kept int
 }
 
 // Apply cleans up after checking again that the plan is unused and
@@ -408,8 +455,9 @@ func (e *Engine) apply(ctx context.Context, p *Plan) (Result, error) {
 			if _, statErr := os.Lstat(dir); errors.Is(statErr, os.ErrNotExist) {
 				continue
 			}
-			skipped, delErr := RemoveContents(runCtx, dir)
-			result.Skipped += skipped
+			stats, delErr := RemoveContents(runCtx, dir, p.options)
+			result.Skipped += stats.Skipped
+			result.Kept += stats.Kept
 			if delErr != nil {
 				err = delErr
 				break
@@ -426,8 +474,7 @@ func (e *Engine) apply(ctx context.Context, p *Plan) (Result, error) {
 	}
 	for _, dir := range measuredAfter(p) {
 		if size, merr := Measure(ctx, dir); merr == nil {
-			result.SizeAfter.Bytes += size.Bytes
-			result.SizeAfter.Files += size.Files
+			result.SizeAfter.add(size)
 		}
 	}
 	return result, err

@@ -27,15 +27,16 @@ func New() (*Engine, error) {
 		return nil, err
 	}
 	return &Engine{
-		Runner:    execRunner{},
-		Protected: protectedFolders,
-		FreeBytes: storage.FreeBytes,
-		Lock:      lockCleanup,
-		History:   &History{Path: historyPath},
-		Getenv:    os.Getenv,
-		Home:      os.UserHomeDir,
-		Running:   runningExecutables,
-		Now:       time.Now,
+		Runner:      execRunner{},
+		Protected:   protectedFolders,
+		FreeBytes:   storage.FreeBytes,
+		Lock:        lockCleanup,
+		History:     &History{Path: historyPath},
+		Getenv:      os.Getenv,
+		Home:        os.UserHomeDir,
+		Running:     runningExecutables,
+		PathEntries: pathEntries,
+		Now:         time.Now,
 	}, nil
 }
 

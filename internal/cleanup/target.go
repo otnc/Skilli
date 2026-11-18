@@ -14,6 +14,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/otnc/Skilli/internal/config"
 )
 
 // Command is an executable name looked up in PATH and its arguments.
@@ -24,14 +27,18 @@ type Command struct {
 
 // Target is a folder Skilli can measure and possibly clean.
 //
-// The folder comes from one of two places. With Locate set, the tool
-// prints it. Otherwise it is the environment variable EnvDir, or, when
-// that is unset, DefaultDir under the folder in the environment variable
-// DefaultBase (the user's home when DefaultBase is empty). SubDir is then
-// joined to it in either case.
+// The folder comes from one of three places. Dir names it outright, as
+// for a target the user added. With Locate set, the tool prints it.
+// Otherwise it is the environment variable EnvDir, or, when that is unset,
+// DefaultDir under the folder in the environment variable DefaultBase (the
+// user's home when DefaultBase is empty). SubDir is then joined to it.
 type Target struct {
 	ID   string
 	Name string
+	// Custom marks a target the user added in the settings.
+	Custom bool
+	// Dir is the folder itself, when no tool or variable tells it.
+	Dir string
 	// Locate prints the folder.
 	Locate Command
 	// Parse extracts the folder from Locate's output; nil takes the whole
@@ -44,12 +51,15 @@ type Target struct {
 	DefaultBase          string
 	DefaultDir           string
 	SubDir               string
-	// Clean is the tool's own cleanup command. Only one of Clean and
-	// Delete is set; with neither, the target is only measured.
+	// Clean is the tool's own cleanup command. With neither Clean nor
+	// Delete, the target is only measured.
 	Clean *Command
 	// Delete lets Skilli remove the folder's contents itself, for a cache
-	// whose tool offers no cleanup command.
-	Delete *Deletion
+	// whose tool offers no cleanup command. With both set, the one that
+	// PreferDelete chooses is tried first, and the other only when the
+	// first cannot be used: its tool is missing or of the wrong version.
+	Delete       *Deletion
+	PreferDelete bool
 	// AcceptMajor, when set, runs the clean tool with --version before a
 	// cleanup and refuses it unless the major version passes. The same
 	// yarn command cleans Yarn 1's cache or Yarn 2+'s depending on which
@@ -58,9 +68,6 @@ type Target struct {
 	// Executable maps the executable PATH resolves to the one to run, or
 	// refuses it, as for the dart.bat wrapper of Flutter.
 	Executable func(found string) (string, error)
-	// SettingsURI is an ms-settings: page where Windows cleans the target,
-	// for a folder that no single tool owns.
-	SettingsURI string
 	// Note tells the user what the cleanup removes and what it costs.
 	Note string
 	// PerDrive marks a tool that keeps one cache per drive and acts on the
@@ -91,13 +98,38 @@ type Deletion struct {
 	// removed; empty means the contents of the target folder itself. They
 	// let a deletion skip what is not cache, such as Hugging Face's token.
 	Paths []string
+	// OlderThan keeps what was modified more recently, as files an app in
+	// the temporary folder may still use.
+	OlderThan time.Duration
+	// KeepProtected keeps read-only, hidden and system files.
+	KeepProtected bool
+	// LinksOnly removes only the links directly in the folder.
+	LinksOnly bool
+	// KeepPathEntries keeps any entry that PATH names, in the registry or
+	// in Skilli's own environment, as the fnm link a user's PATH may hold.
+	KeepPathEntries bool
 }
 
 // Cleanable reports whether Skilli can clean the target, by the tool's
 // command or by deleting it.
 func (t Target) Cleanable() bool { return t.Clean != nil || t.Delete != nil }
 
-func (t Target) locatedByCommand() bool { return t.Locate.Name != "" }
+func (t Target) locatedByCommand() bool { return t.Locate.Name != "" && t.Dir == "" }
+
+// methods lists the cleanup methods to try, in order.
+func (t Target) methods() []string {
+	var methods []string
+	if t.Clean != nil {
+		methods = append(methods, MethodCommand)
+	}
+	if t.Delete != nil {
+		methods = append(methods, MethodDelete)
+	}
+	if t.PreferDelete {
+		slices.Reverse(methods)
+	}
+	return methods
+}
 
 // Targets returns the built-in targets in display order.
 //
@@ -197,7 +229,37 @@ func Targets() []Target {
 			// no mirror and --mirror would remove nothing.
 			Clean:       &Command{Name: "yarn", Args: []string{"cache", "clean", "--all"}},
 			AcceptMajor: func(major int) bool { return major >= 2 },
-			Note:        "yarn cache clean --all で、Yarn 2 以降がプロジェクト間で共有するキャッシュを削除します。次のインストールで再ダウンロードされます。ホームフォルダで実行した yarn が Yarn 2 以降のときだけ掃除できます。.yarnrc.yml の globalFolder で場所を変えている場合は、既定の場所だけを計測します。",
+			// With Corepack, yarn in the home folder is usually Yarn 1,
+			// which must not run this command; the folder is plain cache.
+			Delete: &Deletion{},
+			Note:   "ホームフォルダで実行した yarn が Yarn 2 以降なら yarn cache clean --all で、そうでなければ Skilli が中身を直接削除して、プロジェクト間で共有するキャッシュを削除します。次のインストールで再ダウンロードされます。.yarnrc.yml の globalFolder で場所を変えている場合は、既定の場所だけが対象です。",
+		},
+		// Node version managers keep every installed Node, which is not
+		// cache; only fnm's per-shell links are cleaned.
+		{
+			ID:          "fnm",
+			Name:        "fnm でインストールした Node",
+			EnvDir:      "FNM_DIR",
+			DefaultBase: "APPDATA",
+			DefaultDir:  "fnm",
+			SubDir:      "node-versions",
+			Note:        "計測のみ。使わないバージョンは fnm uninstall <バージョン> で削除します。",
+		},
+		{
+			ID:          "fnm-multishells",
+			Name:        "fnm のシェルごとのリンク",
+			DefaultBase: "LOCALAPPDATA",
+			DefaultDir:  "fnm_multishells",
+			Delete:      &Deletion{LinksOnly: true, OlderThan: 7 * 24 * time.Hour, KeepPathEntries: true},
+			Note:        "fnm はシェルを起動するたびにここへリンクを 1 つ作り、削除しません。Skilli は 7 日以上前のリンクのうち、PATH に入っていないものだけを削除します。リンク先の Node は削除しません。7 日以上開いたままのシェルでは、node が見つからなくなることがあります。",
+		},
+		{
+			ID:          "nvm",
+			Name:        "nvm-windows でインストールした Node",
+			EnvDir:      "NVM_HOME",
+			DefaultBase: "APPDATA",
+			DefaultDir:  "nvm",
+			Note:        "計測のみ。使わないバージョンは nvm uninstall <バージョン> で削除します。",
 		},
 		{
 			ID:         "bun",
@@ -343,13 +405,48 @@ func Targets() []Target {
 			Note:   "注意: ダウンロードしたモデルやデータセット (hub、xet、assets) を、Skilli が直接削除します。使うときは再ダウンロードになり、大きなモデルは時間がかかります。ログイン用のトークンは削除しません。",
 		},
 		{
-			ID:          "temp",
-			Name:        "ユーザーの一時フォルダ",
-			EnvDir:      "TEMP",
-			SettingsURI: "ms-settings:storagesense",
-			Note:        "使用中のアプリのファイルが含まれるため、Skilli は削除しません。Windows の「設定 > システム > ストレージ > 一時ファイル」で、使用中のファイルを避けて削除できます。",
+			ID:     "temp",
+			Name:   "ユーザーの一時フォルダ",
+			EnvDir: "TEMP",
+			// The same rule as Windows' Disk Cleanup, which leaves files
+			// changed within a week and read-only, hidden or system files.
+			Delete: &Deletion{OlderThan: 7 * 24 * time.Hour, KeepProtected: true},
+			Note:   "Windows のディスククリーンアップと同じく、7 日以上更新されていないファイルだけを Skilli が直接削除します。読み取り専用、隠し、システムのファイルと、使用中のファイルは残します。インストールの途中などで後から使うファイルが消えることがあるため、アプリを終了してから実行してください。",
 		},
 	}
+}
+
+// FromCustom turns a target the user added into a Target. Its folder goes
+// through the same checks as Skilli's own: it must not be or hold a
+// protected folder, nor be reached through a link.
+func FromCustom(c config.CustomTarget) Target {
+	t := Target{ID: c.ID, Name: c.Name, Custom: true, Dir: c.Dir}
+	if c.UsesCommand() && len(c.Command) > 0 {
+		t.Clean = &Command{Name: c.Command[0], Args: c.Command[1:]}
+	}
+	if c.UsesDelete() {
+		t.Delete = &Deletion{}
+	}
+	switch c.Method {
+	case config.MethodCommand:
+		t.Note = "自分で追加した対象です。設定したコマンドで掃除します。"
+	case config.MethodDelete:
+		t.Note = "自分で追加した対象です。Skilli がフォルダの中身を直接削除します。"
+	case config.MethodCommandThenDelete:
+		t.Note = "自分で追加した対象です。設定したコマンドで掃除し、コマンドが見つからないときは Skilli が中身を直接削除します。"
+	default:
+		t.Note = "自分で追加した対象です。Skilli が中身を直接削除します。"
+	}
+	return t
+}
+
+// Find returns the target with the given ID among targets, or the copy of
+// a per-drive built-in target for a drive letter, as pnpm-d.
+func Find(targets []Target, id string) (Target, bool) {
+	if i := slices.IndexFunc(targets, func(t Target) bool { return t.ID == id }); i >= 0 {
+		return targets[i], true
+	}
+	return FindTarget(id)
 }
 
 // TargetsFor returns Targets plus, for each per-drive target, a copy for

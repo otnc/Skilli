@@ -13,6 +13,7 @@ import (
 	"encoding/json/v2"
 
 	"github.com/otnc/Skilli/internal/cleanup"
+	"github.com/otnc/Skilli/internal/config"
 	"github.com/otnc/Skilli/internal/storage"
 )
 
@@ -20,7 +21,6 @@ type testCLI struct {
 	*cli
 	stdout, stderr *bytes.Buffer
 	runner         *fakeRunner
-	openedURIs     []string
 }
 
 type fakeRunner struct {
@@ -71,11 +71,8 @@ func newTestCLI(t *testing.T, stdin string, interactive bool) *testCLI {
 				Now:       time.Now,
 			}, nil
 		},
-		openUpdater: func() error { return nil },
-		openURI: func(uri string) error {
-			tc.openedURIs = append(tc.openedURIs, uri)
-			return nil
-		},
+		openUpdater:   func() error { return nil },
+		customTargets: func() ([]cleanup.Target, error) { return nil, nil },
 	}
 	return tc
 }
@@ -186,12 +183,18 @@ func TestCleanRunsOnlyAfterYes(t *testing.T) {
 	}
 }
 
-func TestCleanTempOpensWindowsSettingsInsteadOfDeleting(t *testing.T) {
+func TestCleanCustomTargetDeletesItsFolder(t *testing.T) {
 	tc := newTestCLI(t, "y\n", true)
-	if code := tc.run(t.Context(), []string{"clean", "temp"}); code != exitOK || tc.runner.runs != 0 {
-		t.Fatalf("exit = %d, runs = %d", code, tc.runner.runs)
+	mine := filepath.Join(t.TempDir(), "mine")
+	os.MkdirAll(mine, 0o700)
+	os.WriteFile(filepath.Join(mine, "junk.bin"), make([]byte, 64), 0o600)
+	tc.customTargets = func() ([]cleanup.Target, error) {
+		return []cleanup.Target{cleanup.FromCustom(config.CustomTarget{ID: "my-1", Name: "mine", Dir: mine, Method: config.MethodDelete})}, nil
 	}
-	if len(tc.openedURIs) != 1 || tc.openedURIs[0] != "ms-settings:storagesense" {
-		t.Fatalf("opened = %q", tc.openedURIs)
+	if code := tc.run(t.Context(), []string{"clean", "my-1"}); code != exitOK {
+		t.Fatalf("exit = %d, stderr = %q", code, tc.stderr.String())
+	}
+	if entries, _ := os.ReadDir(mine); len(entries) != 0 || tc.runner.runs != 0 {
+		t.Fatalf("left %v, runs = %d", entries, tc.runner.runs)
 	}
 }

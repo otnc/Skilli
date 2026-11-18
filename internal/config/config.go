@@ -26,6 +26,64 @@ type Config struct {
 	Notify bool
 	// IgnoredDrives lists drive roots such as `D:\` that are not monitored.
 	IgnoredDrives []string
+	// CustomTargets are caches the user added, which Skilli measures and
+	// cleans like its own.
+	CustomTargets []CustomTarget
+}
+
+// Cleanup methods of a CustomTarget. Only a command can be unusable (not
+// installed), so with both, the command comes first and deletion follows.
+const (
+	MethodCommand           = "command"
+	MethodDelete            = "delete"
+	MethodCommandThenDelete = "command-then-delete"
+)
+
+// CustomTarget is a cache the user added: a folder, and optionally a
+// command that cleans it.
+type CustomTarget struct {
+	// ID names the target in the CLI, as my-1.
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Dir is the folder to measure and, by deletion, to empty.
+	Dir string `json:"dir"`
+	// Command is the cleanup command: an executable looked up in PATH and
+	// its arguments, run without a shell.
+	Command []string `json:"command,omitempty"`
+	Method  string   `json:"method"`
+}
+
+// UsesCommand reports whether the method runs Command.
+func (t CustomTarget) UsesCommand() bool { return t.Method != MethodDelete }
+
+// UsesDelete reports whether the method deletes the folder's contents.
+func (t CustomTarget) UsesDelete() bool { return t.Method != MethodCommand }
+
+// Validate reports what is missing or wrong in t.
+func (t CustomTarget) Validate() error {
+	switch {
+	case strings.TrimSpace(t.ID) == "":
+		return errors.New("custom target has no id")
+	case strings.TrimSpace(t.Name) == "":
+		return fmt.Errorf("custom target %s has no name", t.ID)
+	case !filepath.IsAbs(t.Dir):
+		return fmt.Errorf("custom target %s: folder %q is not an absolute path", t.ID, t.Dir)
+	case !slices.Contains([]string{MethodCommand, MethodDelete, MethodCommandThenDelete}, t.Method):
+		return fmt.Errorf("custom target %s: unknown method %q", t.ID, t.Method)
+	case t.UsesCommand() && len(t.Command) == 0:
+		return fmt.Errorf("custom target %s: method %s needs a command", t.ID, t.Method)
+	}
+	return nil
+}
+
+// NextCustomID returns an ID no custom target uses yet, as my-3.
+func (c Config) NextCustomID() string {
+	for n := 1; ; n++ {
+		id := fmt.Sprintf("my-%d", n)
+		if !slices.ContainsFunc(c.CustomTargets, func(t CustomTarget) bool { return t.ID == id }) {
+			return id
+		}
+	}
 }
 
 // Default returns the settings used before the user changes anything.
@@ -46,16 +104,27 @@ func (c Config) Validate() error {
 	if c.LowSpaceBytes < MinLowSpaceBytes || c.LowSpaceBytes > MaxLowSpaceBytes {
 		return fmt.Errorf("low_space_bytes %d is outside %d..%d", c.LowSpaceBytes, MinLowSpaceBytes, MaxLowSpaceBytes)
 	}
+	seen := map[string]bool{}
+	for _, t := range c.CustomTargets {
+		if err := t.Validate(); err != nil {
+			return err
+		}
+		if seen[t.ID] {
+			return fmt.Errorf("custom target id %s is used twice", t.ID)
+		}
+		seen[t.ID] = true
+	}
 	return nil
 }
 
 // fileConfig uses pointers so that a key missing from the file keeps its
 // default instead of becoming the zero value.
 type fileConfig struct {
-	SchemaVersion int      `json:"schema_version"`
-	LowSpaceBytes *uint64  `json:"low_space_bytes,omitempty"`
-	Notify        *bool    `json:"notify,omitempty"`
-	IgnoredDrives []string `json:"ignored_drives,omitempty"`
+	SchemaVersion int            `json:"schema_version"`
+	LowSpaceBytes *uint64        `json:"low_space_bytes,omitempty"`
+	Notify        *bool          `json:"notify,omitempty"`
+	IgnoredDrives []string       `json:"ignored_drives,omitempty"`
+	CustomTargets []CustomTarget `json:"custom_targets,omitempty"`
 }
 
 const schemaVersion = 1
@@ -96,6 +165,7 @@ func Load(path string) (Config, error) {
 		cfg.Notify = *file.Notify
 	}
 	cfg.IgnoredDrives = file.IgnoredDrives
+	cfg.CustomTargets = file.CustomTargets
 	if err := cfg.Validate(); err != nil {
 		return Default(), fmt.Errorf("%s: %w", path, err)
 	}
@@ -113,6 +183,7 @@ func Save(path string, cfg Config) error {
 		LowSpaceBytes: new(cfg.LowSpaceBytes),
 		Notify:        new(cfg.Notify),
 		IgnoredDrives: cfg.IgnoredDrives,
+		CustomTargets: cfg.CustomTargets,
 	})
 	if err != nil {
 		return err

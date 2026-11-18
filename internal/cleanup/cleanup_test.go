@@ -186,7 +186,7 @@ func TestNewPlanRefusesProtectedFolders(t *testing.T) {
 
 func TestNewPlanRefusesMeasureOnlyTarget(t *testing.T) {
 	f := newFixture(t)
-	target, _ := FindTarget("temp")
+	target, _ := FindTarget("rustup")
 	if _, err := f.engine.NewPlan(t.Context(), target); !errors.Is(err, ErrNotCleanable) {
 		t.Fatalf("NewPlan: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestTargetsAreWellFormed(t *testing.T) {
 		}
 		seen[target.ID] = true
 		byCommand := target.locatedByCommand()
-		byEnvironment := target.EnvDir != "" || target.DefaultDir != ""
+		byEnvironment := target.EnvDir != "" || target.DefaultDir != "" || target.Dir != ""
 		if byCommand == byEnvironment {
 			t.Errorf("%s must be located either by a command or by the environment", target.ID)
 		}
@@ -413,17 +413,14 @@ func (r *dirRecorder) Output(ctx context.Context, dir, exe string, args []string
 }
 
 func TestYarnCleanupChecksTheYarnVersion(t *testing.T) {
-	cases := []struct {
-		id, version string
-		wantErr     bool
-		wantArgs    string
-	}{
-		{"yarn", "1.22.22", false, "cache clean"},
-		{"yarn", "4.5.1", true, ""},
-		{"yarn-berry", "4.5.1", false, "cache clean --all"},
-		{"yarn-berry", "3.8.7", false, "cache clean --all"},
-		{"yarn-berry", "1.22.22", true, ""},
-		{"yarn-berry", "not a version", true, ""},
+	// want is "error", "delete" or the arguments the yarn command gets.
+	cases := []struct{ id, version, want string }{
+		{"yarn", "1.22.22", "cache clean"},
+		{"yarn", "4.5.1", "error"},
+		{"yarn-berry", "4.5.1", "cache clean --all"},
+		{"yarn-berry", "3.8.7", "cache clean --all"},
+		{"yarn-berry", "1.22.22", "delete"},
+		{"yarn-berry", "not a version", "delete"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.id+"@"+tc.version, func(t *testing.T) {
@@ -437,9 +434,21 @@ func TestYarnCleanupChecksTheYarnVersion(t *testing.T) {
 			}
 			target, _ := FindTarget(tc.id)
 			plan, err := f.engine.NewPlan(t.Context(), target)
-			if tc.wantErr {
+			switch tc.want {
+			case "error":
 				if !errors.Is(err, ErrWrongVersion) {
 					t.Fatalf("NewPlan: %v; want ErrWrongVersion", err)
+				}
+				return
+			case "delete":
+				if err != nil || !plan.Deletes() || plan.Fallback == "" {
+					t.Fatalf("plan = %+v, %v; want a deletion that says why", plan, err)
+				}
+				if _, err := f.engine.Apply(t.Context(), plan, "cli"); err != nil || len(f.runner.runs) != 0 {
+					t.Fatalf("Apply = %v, runs = %q; a wrong yarn must never run", err, f.runner.runs)
+				}
+				if entries, _ := os.ReadDir(f.cache); len(entries) != 0 {
+					t.Fatalf("cache still holds %v", entries)
 				}
 				return
 			}
@@ -458,8 +467,8 @@ func TestYarnCleanupChecksTheYarnVersion(t *testing.T) {
 			if _, err := f.engine.Apply(t.Context(), plan, "cli"); err != nil {
 				t.Fatal(err)
 			}
-			if got := strings.Join(f.runner.runs[0][1:], " "); got != tc.wantArgs {
-				t.Fatalf("ran %q; want %q", got, tc.wantArgs)
+			if got := strings.Join(f.runner.runs[0][1:], " "); got != tc.want {
+				t.Fatalf("ran %q; want %q", got, tc.want)
 			}
 		})
 	}
