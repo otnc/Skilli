@@ -29,28 +29,29 @@ Skilli（スキリ）は、Windows のタスクトレイから空き容量を確
 | --- | --- | --- |
 | `uv` | uv キャッシュ | `uv cache prune` (使われていないキャッシュだけ) |
 | `pip` | pip キャッシュ | `python -m pip cache purge` (すべて削除) |
-| `poetry` | Poetry キャッシュ | 計測のみ (既定でプロジェクトの仮想環境を含むため) |
+| `poetry` | Poetry のリポジトリキャッシュ | `poetry cache clear --all --no-interaction` |
+| `poetry-artifacts` | Poetry のダウンロード済みパッケージ | 直接削除 (仮想環境は残す) |
 | `conda` | conda パッケージキャッシュ | `conda clean --all --yes` (環境が使っていないものだけ) |
 | `npm` | npm キャッシュ | `npm cache verify` (不要になったデータだけ) |
 | `pnpm` | pnpm ストア | `pnpm store prune` (参照されていないパッケージだけ) |
 | `yarn` | Yarn 1 のキャッシュ | `yarn cache clean` (すべて削除) |
 | `yarn-berry` | Yarn 2 以降のグローバルキャッシュ | `yarn cache clean --all` (すべて削除) |
-| `bun` | Bun キャッシュ | 計測のみ (掃除のコマンドがプロジェクトの中でしか動かないため) |
+| `bun` | Bun キャッシュ | 直接削除 (掃除のコマンドがプロジェクトの中でしか動かないため) |
 | `deno` | Deno キャッシュ | `deno clean` (すべて削除) |
-| `playwright` | Playwright のブラウザ | 計測のみ |
+| `playwright` | Playwright のブラウザ | 直接削除 |
 | `go-build` | Go ビルドキャッシュ | `go clean -cache` |
 | `go-mod` | Go モジュールキャッシュ | `go clean -modcache` (すべて削除) |
-| `cargo` | Cargo のレジストリ | 計測のみ (Cargo が自動で削除するため) |
-| `cargo-git` | Cargo の Git 依存 | 計測のみ (Cargo が自動で削除するため) |
-| `rustup` | Rust のツールチェーン | 計測のみ |
+| `cargo` | Cargo のレジストリ | 直接削除 |
+| `cargo-git` | Cargo の Git 依存 | 直接削除 |
+| `rustup` | Rust のツールチェーン | 計測のみ (`rustup toolchain uninstall` で削除する) |
 | `nuget` | NuGet のグローバルパッケージ | `dotnet nuget locals global-packages --clear` (すべて削除) |
 | `nuget-http` | NuGet の HTTP キャッシュ | `dotnet nuget locals http-cache --clear` |
-| `gradle` | Gradle キャッシュ | 計測のみ (Gradle が自動で削除するため) |
-| `maven` | Maven のローカルリポジトリ | 計測のみ |
+| `gradle` | Gradle キャッシュ | 直接削除 |
+| `maven` | Maven のローカルリポジトリ | 直接削除 (`mvn install` した成果物も消える) |
 | `composer` | Composer キャッシュ | `composer clear-cache` (すべて削除) |
 | `dart-pub` | Dart / Flutter の pub キャッシュ | `dart pub cache clean --force` (すべて削除) |
 | `mise` | mise キャッシュ | `mise cache prune` (最近使われていないものだけ) |
-| `huggingface` | Hugging Face のキャッシュ | 計測のみ (モデルやデータセットが入っているため) |
+| `huggingface` | Hugging Face のキャッシュ | 直接削除 (`hub`、`xet`、`assets` だけ。トークンは残す) |
 | `temp` | ユーザーの一時フォルダ | Windows の「設定 > システム > ストレージ」を開く |
 
 「すべて削除」のコマンドを実行すると、必要なパッケージやモジュールを次のビルドやインストールで再ダウンロードすることになり、オフラインではビルドできなくなります。とくに `go clean -modcache` と `dart pub cache clean` は、使用中かどうかに関係なく削除します。一時フォルダには使用中のアプリのファイルが含まれるため、Skilli は削除せず、使用中のファイルを避けて削除できる Windows の機能に任せます。Rust のプロジェクトごとのビルド結果 (`target` フォルダ) は大きくなりやすいですが、プロジェクトの場所は Skilli には分からないため、各プロジェクトで `cargo clean` を実行してください。
@@ -59,26 +60,28 @@ Yarn は、PATH の `yarn` が Yarn 1 か Yarn 2 以降かで同じコマンド�
 
 Flutter の `dart` (`bin\dart.bat`) は、実行のたびに Flutter のバージョンを確かめ、Dart SDK のダウンロードや Flutter のツールの再ビルドをすることがあります。Skilli は Flutter に同梱された Dart SDK (`bin\cache\dart-sdk\bin\dart.exe`) を直接実行し、同梱の SDK がまだないときは実行しません。
 
-キャッシュの場所を調べるだけで、ツールがダウンロードやインストールを始めないよう、Skilli が実行するコマンドには次の環境変数を付けます。`MISE_AUTO_INSTALL=false` は mise の shims が足りないバージョンを自動でインストールするのを、`COREPACK_ENABLE_NETWORK=0` は Corepack が pnpm や Yarn をダウンロードするのを、`GOTOOLCHAIN=local` は Go が別のツールチェーンをダウンロードするのを止めます。
+キャッシュの場所を調べるだけで、ツールがダウンロードやインストールを始めないよう、Skilli が実行するコマンドには次の環境変数を付けます。`MISE_AUTO_INSTALL=false` は mise の shims が足りないバージョンを自動でインストールするのを、`COREPACK_ENABLE_NETWORK=0` は Corepack が pnpm や Yarn をダウンロードするのを、`GOTOOLCHAIN=local` は Go が別のツールチェーンをダウンロードするのを止めます。`UV_LOCK_TIMEOUT=10` で、uv がキャッシュのロックを待つ時間を 300 秒から 10 秒に縮めます。
 
 pnpm は、プロジェクトのあるドライブごとにストア (`D:\.pnpm-store` など) を作ります。Skilli はホームフォルダのあるドライブのストアを `pnpm`、ほかのドライブのストアを `pnpm-d` のように ID の末尾にドライブ名を付けて扱います。ほかのドライブは、既定の場所にストアがあるときだけ一覧に出します。
 
 各ツールは Windows の環境変数 PATH から探し、コマンドはユーザーのホームフォルダで実行します。プロジェクトのフォルダで実行すると、そのプロジェクトの設定で結果が変わったり、Go がツールチェーンをダウンロードしたりするためです。シェルの起動時にだけ PATH を変える方法 (`fnm env` や `mise activate` など) で使えるようにしたツールは、サインイン時やスタートメニューから起動した Skilli からは見つかりません。mise を使うなら、shims のフォルダを PATH に入れておくと見つかります。Microsoft Store を開くだけの `python.exe` などの「アプリ実行エイリアス」は、インストールされていないものとして扱います。
 
-Skilli はファイルを直接削除しません。掃除は各ツールの公式コマンドで行い、次の条件をすべて満たしたときだけ実行します。
+掃除には、ツールの公式コマンドがあればそれを使います。公式の方法がないキャッシュ (表の「直接削除」) だけ、Skilli がフォルダの中身を直接削除します。どちらも次の条件をすべて満たしたときだけ実行します。
 
-- 実行する前に、対象フォルダ、サイズ、実行するコマンドを表示して確認を求めます。CLI は対話できるターミナルでのみ実行し、それ以外では終了コード `3` で止まります。
+- 実行する前に、対象フォルダ、サイズ、実行するコマンドか削除するフォルダを表示して確認を求めます。CLI は対話できるターミナルでのみ実行し、それ以外では終了コード `3` で止まります。
 - 確認は 10 分間だけ有効で、1 回しか使えません。
-- 実行の直前に、確認したときと同じ実行ファイルが PATH から見つかること、その実行ファイルが置き換わっていないこと、ツールが同じフォルダを返すことを確かめます。どれかが変わっていたら中止し、別の方法に切り替えません。
+- そのキャッシュを使うプログラム (`uv.exe`、`cargo.exe`、`bun.exe` など) が動いている間は実行しません。`uv run` で起動した MCP サーバーのように常駐するプロセスも対象で、終了してからやり直すよう案内します。
+- 公式コマンドは、実行の直前に、確認したときと同じ実行ファイルが PATH から見つかること、その実行ファイルが置き換わっていないこと、ツールが同じフォルダを返すことを確かめます。どれかが変わっていたら中止し、別の方法に切り替えません。
+- 直接削除は、実行の直前に、確認したときと同じフォルダ (同じファイル ID) であることを確かめます。フォルダそのものは残して中身だけを削除し、シンボリックリンクやジャンクションはたどらずにそのまま残します。使用中で消せないファイルは削除せずに残し、その件数を報告します。
 - ドライブ直下、ユーザープロファイル、Windows、Program Files、ドキュメントやデスクトップなどの既知フォルダと、それらを含むフォルダは対象にしません。シンボリックリンクやジャンクションを経由するフォルダも対象にしません。
-- 同時に実行できる掃除は、GUI と CLI を合わせて 1 件だけです。結果は `%LOCALAPPDATA%\Skilli\history.jsonl` に記録します。履歴にはパスを含めません。
+- 同時に実行できる掃除は、GUI と CLI を合わせて 1 件だけです。結果は `%LOCALAPPDATA%\Skilli\history.jsonl` に記録します。履歴のエラーメッセージでは、ホームフォルダを `~` に置き換えます。
 
 ### CLI
 
 ```text
 skilli status [--json]             固定ドライブの空き容量を確認する
 skilli scan [ID...] [--json]       キャッシュの場所とサイズを計測する
-skilli clean <ID>                  確認のうえ、ツール公式のコマンドで掃除する
+skilli clean <ID>                  確認のうえ、公式コマンドか直接削除で掃除する
 skilli history [--days N] [--json] 掃除の履歴を表示する
 skilli update                      更新を確認する画面を開く
 ```
