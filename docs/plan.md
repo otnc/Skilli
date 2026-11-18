@@ -9,7 +9,7 @@
 - 固定ドライブの空き容量の表示と、15 分ごととスリープ復帰時の確認
 - 空き不足の通知 (しきい値、6 時間の再通知、110% での解除) と、トレイのアイコンとツールチップでの状態表示
 - 設定画面 (通知、しきい値、監視するドライブ、サインイン時の起動)
-- キャッシュの計測と、uv・pip・Go ビルドキャッシュ・pnpm・npm・mise・Go モジュールキャッシュの公式コマンドによる掃除 (Poetry は計測のみ)。一時フォルダは Windows のストレージ設定を開く
+- キャッシュの計測と、ツール公式のコマンドによる掃除 (uv、pip、conda、npm、pnpm、Yarn 1、Deno、Go、NuGet、Composer、Dart の pub、mise)。Poetry、Bun、Playwright、Cargo、rustup、Gradle、Maven、Hugging Face は計測のみ。pnpm はドライブごとのストアも扱う。一時フォルダは Windows のストレージ設定を開く
 - 掃除の履歴と、CLI の `status`・`scan`・`clean`・`history`
 - インストール時の利用規約への同意
 

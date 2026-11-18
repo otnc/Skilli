@@ -30,14 +30,31 @@ Skilli（スキリ）は、Windows のタスクトレイから空き容量を確
 | `uv` | uv キャッシュ | `uv cache prune` (使われていないキャッシュだけ) |
 | `pip` | pip キャッシュ | `python -m pip cache purge` (すべて削除) |
 | `poetry` | Poetry キャッシュ | 計測のみ (既定でプロジェクトの仮想環境を含むため) |
-| `mise` | mise キャッシュ | `mise cache prune` (最近使われていないものだけ) |
-| `go-build` | Go ビルドキャッシュ | `go clean -cache` |
-| `pnpm` | pnpm ストア | `pnpm store prune` (参照されていないパッケージだけ) |
+| `conda` | conda パッケージキャッシュ | `conda clean --all --yes` (環境が使っていないものだけ) |
 | `npm` | npm キャッシュ | `npm cache verify` (不要になったデータだけ) |
+| `pnpm` | pnpm ストア | `pnpm store prune` (参照されていないパッケージだけ) |
+| `yarn` | Yarn 1 のキャッシュ | `yarn cache clean` (すべて削除) |
+| `bun` | Bun キャッシュ | 計測のみ (掃除のコマンドがプロジェクトの中でしか動かないため) |
+| `deno` | Deno キャッシュ | `deno clean` (すべて削除) |
+| `playwright` | Playwright のブラウザ | 計測のみ |
+| `go-build` | Go ビルドキャッシュ | `go clean -cache` |
 | `go-mod` | Go モジュールキャッシュ | `go clean -modcache` (すべて削除) |
+| `cargo` | Cargo のレジストリ | 計測のみ (Cargo が自動で削除するため) |
+| `cargo-git` | Cargo の Git 依存 | 計測のみ (Cargo が自動で削除するため) |
+| `rustup` | Rust のツールチェーン | 計測のみ |
+| `nuget` | NuGet のグローバルパッケージ | `dotnet nuget locals global-packages --clear` (すべて削除) |
+| `nuget-http` | NuGet の HTTP キャッシュ | `dotnet nuget locals http-cache --clear` |
+| `gradle` | Gradle キャッシュ | 計測のみ (Gradle が自動で削除するため) |
+| `maven` | Maven のローカルリポジトリ | 計測のみ |
+| `composer` | Composer キャッシュ | `composer clear-cache` (すべて削除) |
+| `dart-pub` | Dart / Flutter の pub キャッシュ | `dart pub cache clean --force` (すべて削除) |
+| `mise` | mise キャッシュ | `mise cache prune` (最近使われていないものだけ) |
+| `huggingface` | Hugging Face のキャッシュ | 計測のみ (モデルやデータセットが入っているため) |
 | `temp` | ユーザーの一時フォルダ | Windows の「設定 > システム > ストレージ」を開く |
 
-`go clean -modcache` はモジュールキャッシュをすべて削除します。すべてのプロジェクトが次のビルドで依存を再ダウンロードし、オフラインではビルドできなくなります。一時フォルダには使用中のアプリのファイルが含まれるため、Skilli は削除せず、使用中のファイルを避けて削除できる Windows の機能に任せます。
+「すべて削除」のコマンドを実行すると、必要なパッケージやモジュールを次のビルドやインストールで再ダウンロードすることになり、オフラインではビルドできなくなります。とくに `go clean -modcache` と `dart pub cache clean` は、使用中かどうかに関係なく削除します。一時フォルダには使用中のアプリのファイルが含まれるため、Skilli は削除せず、使用中のファイルを避けて削除できる Windows の機能に任せます。Rust のプロジェクトごとのビルド結果 (`target` フォルダ) は大きくなりやすいですが、プロジェクトの場所は Skilli には分からないため、各プロジェクトで `cargo clean` を実行してください。
+
+pnpm は、プロジェクトのあるドライブごとにストア (`D:\.pnpm-store` など) を作ります。Skilli はホームフォルダのあるドライブのストアを `pnpm`、ほかのドライブのストアを `pnpm-d` のように ID の末尾にドライブ名を付けて扱います。ほかのドライブは、既定の場所にストアがあるときだけ一覧に出します。
 
 各ツールは Windows の環境変数 PATH から探し、コマンドはユーザーのホームフォルダで実行します。プロジェクトのフォルダで実行すると、そのプロジェクトの設定で結果が変わったり、Go がツールチェーンをダウンロードしたりするためです。シェルの起動時にだけ PATH を変える方法 (`fnm env` や `mise activate` など) で使えるようにしたツールは、サインイン時やスタートメニューから起動した Skilli からは見つかりません。mise を使うなら、shims のフォルダを PATH に入れておくと見つかります。Microsoft Store を開くだけの `python.exe` などの「アプリ実行エイリアス」は、インストールされていないものとして扱います。
 
