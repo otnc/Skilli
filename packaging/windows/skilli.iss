@@ -15,6 +15,10 @@ DefaultDirName={localappdata}\Programs\Skilli
 DefaultGroupName=Skilli
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
+; Inno Setup 6.7+ enables RedirectionGuard on Setup, and without elevation the
+; app started at the end inherits it; it then cannot follow junctions that
+; tools such as vite-plus or fnm create (Windows error 448).
+RedirectionGuard=no
 MinVersion=10.0.22000
 ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os

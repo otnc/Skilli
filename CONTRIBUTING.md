@@ -20,7 +20,7 @@ go vet ./...
 
 `dist/skilli.exe` はターミナルから結果を取得する CLI 用です。`dist/skilli-gui.exe` はコンソールを出さずにウィンドウを開きます。両方とも同じソースを使います。`skilli-gui.exe --background` でウィンドウを出さずトレイに常駐します。
 
-Inno Setup 6.3 以上を用意し、次のコマンドで Windows 用インストーラーを作れます。必要なら `-CompilerPath` に `ISCC.exe` のパスを渡します。
+Inno Setup 6.7 以上を用意し、次のコマンドで Windows 用インストーラーを作れます。必要なら `-CompilerPath` に `ISCC.exe` のパスを渡します。
 
 ```powershell
 ./scripts/build.ps1 -Installer
