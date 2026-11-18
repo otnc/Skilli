@@ -2,13 +2,8 @@
 package desktop
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"image"
-	"image/color"
-	"image/draw"
-	"image/png"
 	"slices"
 	"strings"
 	"time"
@@ -18,6 +13,7 @@ import (
 
 	"github.com/otnc/Skilli/internal/cleanup"
 	"github.com/otnc/Skilli/internal/config"
+	"github.com/otnc/Skilli/internal/icon"
 	"github.com/otnc/Skilli/internal/monitor"
 	"github.com/otnc/Skilli/internal/storage"
 )
@@ -27,11 +23,7 @@ const driveCheckInterval = 15 * time.Minute
 
 const lowSpaceNotificationID = "skilli-low-space"
 
-var (
-	warningColor = ui.Hex("#b45309")
-	tealColor    = color.NRGBA{R: 26, G: 94, B: 111, A: 255}
-	amberColor   = color.NRGBA{R: 217, G: 119, B: 6, A: 255}
-)
+var warningColor = ui.Hex("#b45309")
 
 // dashboard is touched only on the main thread; goroutines hand their
 // results back through mygo.RunOnMain.
@@ -158,11 +150,11 @@ func (d *dashboard) saveConfig() {
 func (d *dashboard) startTray() error {
 	d.icons = map[bool][]byte{}
 	for _, low := range []bool{false, true} {
-		icon, err := trayIcon(low)
+		png, err := icon.PNG(32, low)
 		if err != nil {
 			return err
 		}
-		d.icons[low] = icon
+		d.icons[low] = png
 	}
 	tray, err := mygo.NewTray(mygo.TrayOptions{
 		ID:      "skilli",
@@ -182,24 +174,6 @@ func (d *dashboard) startTray() error {
 	tray.OnClick(d.show)
 	d.tray = tray
 	return nil
-}
-
-// trayIcon draws a drive with a fill bar: teal normally, amber and fuller
-// when a drive is low, so the state shows without reading the tooltip.
-func trayIcon(low bool) ([]byte, error) {
-	body, fill, fillEnd := tealColor, color.NRGBA{R: 134, G: 232, B: 190, A: 255}, 16
-	if low {
-		body, fill, fillEnd = amberColor, color.NRGBA{R: 254, G: 226, B: 226, A: 255}, 24
-	}
-	icon := image.NewNRGBA(image.Rect(0, 0, 32, 32))
-	draw.Draw(icon, image.Rect(2, 5, 30, 27), image.NewUniform(body), image.Point{}, draw.Src)
-	draw.Draw(icon, image.Rect(6, 16, 26, 22), image.NewUniform(color.NRGBA{R: 250, G: 253, B: 252, A: 255}), image.Point{}, draw.Src)
-	draw.Draw(icon, image.Rect(6, 16, fillEnd, 22), image.NewUniform(fill), image.Point{}, draw.Src)
-	var out bytes.Buffer
-	if err := png.Encode(&out, icon); err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
 }
 
 func (d *dashboard) show() {

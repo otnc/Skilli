@@ -44,7 +44,8 @@ try {
 
   New-Item -ItemType Directory -Path resources | Out-Null
   # mygo build が resources/icon.png を skilli-gui.exe のアイコンとして埋め込む。
-  Copy-Item -LiteralPath (Join-Path $repo 'packaging/icon.png') -Destination resources/icon.png
+  go -C $repo run ./scripts/icon (Join-Path $work.FullName 'resources/icon.png')
+  if ($LASTEXITCODE -ne 0) { throw "アイコンを生成できませんでした: $LASTEXITCODE" }
   go build -trimpath -ldflags "-X main.version=$Version" -o resources/skilli.exe ./cmd/skilli
   if ($LASTEXITCODE -ne 0) { throw "CLI のビルドに失敗しました: $LASTEXITCODE" }
 
