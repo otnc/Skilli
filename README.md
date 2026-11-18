@@ -34,6 +34,7 @@ Skilli（スキリ）は、Windows のタスクトレイから空き容量を確
 | `npm` | npm キャッシュ | `npm cache verify` (不要になったデータだけ) |
 | `pnpm` | pnpm ストア | `pnpm store prune` (参照されていないパッケージだけ) |
 | `yarn` | Yarn 1 のキャッシュ | `yarn cache clean` (すべて削除) |
+| `yarn-berry` | Yarn 2 以降のグローバルキャッシュ | `yarn cache clean --all` (すべて削除) |
 | `bun` | Bun キャッシュ | 計測のみ (掃除のコマンドがプロジェクトの中でしか動かないため) |
 | `deno` | Deno キャッシュ | `deno clean` (すべて削除) |
 | `playwright` | Playwright のブラウザ | 計測のみ |
@@ -53,6 +54,12 @@ Skilli（スキリ）は、Windows のタスクトレイから空き容量を確
 | `temp` | ユーザーの一時フォルダ | Windows の「設定 > システム > ストレージ」を開く |
 
 「すべて削除」のコマンドを実行すると、必要なパッケージやモジュールを次のビルドやインストールで再ダウンロードすることになり、オフラインではビルドできなくなります。とくに `go clean -modcache` と `dart pub cache clean` は、使用中かどうかに関係なく削除します。一時フォルダには使用中のアプリのファイルが含まれるため、Skilli は削除せず、使用中のファイルを避けて削除できる Windows の機能に任せます。Rust のプロジェクトごとのビルド結果 (`target` フォルダ) は大きくなりやすいですが、プロジェクトの場所は Skilli には分からないため、各プロジェクトで `cargo clean` を実行してください。
+
+Yarn は、PATH の `yarn` が Yarn 1 か Yarn 2 以降かで同じコマンドが別のキャッシュを削除するため、掃除の前に `yarn --version` を確かめ、対象に合わないときは実行しません。Corepack を使っていると、ホームフォルダで実行した `yarn` は Yarn 1 になることが多く、その場合 Yarn 2 以降のキャッシュは計測だけになります。Yarn 2 以降のプロジェクトで `yarn cache clean --all` を実行すれば、同じキャッシュを削除できます。
+
+Flutter の `dart` (`bin\dart.bat`) は、実行のたびに Flutter のバージョンを確かめ、Dart SDK のダウンロードや Flutter のツールの再ビルドをすることがあります。Skilli は Flutter に同梱された Dart SDK (`bin\cache\dart-sdk\bin\dart.exe`) を直接実行し、同梱の SDK がまだないときは実行しません。
+
+キャッシュの場所を調べるだけで、ツールがダウンロードやインストールを始めないよう、Skilli が実行するコマンドには次の環境変数を付けます。`MISE_AUTO_INSTALL=false` は mise の shims が足りないバージョンを自動でインストールするのを、`COREPACK_ENABLE_NETWORK=0` は Corepack が pnpm や Yarn をダウンロードするのを、`GOTOOLCHAIN=local` は Go が別のツールチェーンをダウンロードするのを止めます。
 
 pnpm は、プロジェクトのあるドライブごとにストア (`D:\.pnpm-store` など) を作ります。Skilli はホームフォルダのあるドライブのストアを `pnpm`、ほかのドライブのストアを `pnpm-d` のように ID の末尾にドライブ名を付けて扱います。ほかのドライブは、既定の場所にストアがあるときだけ一覧に出します。
 
