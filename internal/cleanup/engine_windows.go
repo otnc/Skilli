@@ -83,9 +83,17 @@ func command(ctx context.Context, dir, exe string, args []string) *exec.Cmd {
 	if home, err := os.UserHomeDir(); err == nil && dir == "" {
 		cmd.Dir = home
 	}
-	// Plain output keeps the lines that Target.Parse reads free of color
-	// codes and of the .NET SDK's first-run banner.
-	cmd.Env = append(os.Environ(), "NO_COLOR=1", "DOTNET_NOLOGO=1")
+	cmd.Env = append(os.Environ(),
+		// Plain output keeps the lines that Target.Parse reads free of
+		// color codes and of the .NET SDK's first-run banner.
+		"NO_COLOR=1", "DOTNET_NOLOGO=1",
+		// Asking a tool where its cache is must not install anything:
+		// without these, a mise shim installs a missing version, Corepack
+		// downloads the pinned pnpm or Yarn without asking when stdin is
+		// not a terminal, and go may download the toolchain GOTOOLCHAIN
+		// names. The installed versions report the same cache folders.
+		"MISE_AUTO_INSTALL=false", "COREPACK_ENABLE_NETWORK=0", "GOTOOLCHAIN=local",
+	)
 	// The GUI build has no console, so each console tool would otherwise
 	// flash a window of its own.
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
